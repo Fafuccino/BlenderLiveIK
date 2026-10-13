@@ -170,11 +170,16 @@ def _on_symmetric_changed(self, context):
     _redraw(self, context)
 
 
+restoring = False  # True while the saved panel state is put back (see state.py)
+
+
 def _on_mode_changed(self, context):
     """Switching IK off forgets what the solver remembered: nothing keeps the limbs where it
     left them, so when it is switched back on it takes over from the pose as it is then."""
     from . import heel
 
+    if restoring:
+        return
     if context.window_manager.live_ik_gizmo_mode == "OFF":
         for obj in bpy.data.objects:
             if obj.type == "ARMATURE":
