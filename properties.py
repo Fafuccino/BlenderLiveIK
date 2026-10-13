@@ -321,6 +321,8 @@ class LiveIKChain(bpy.types.PropertyGroup):
     heel_yaw: FloatProperty(name="Yaw", subtype="ANGLE", description="Swivel the foot", update=_on_heel_changed)
     # The rotation currently applied to the foot (armature space), to undo it when it changes.
     heel_applied: FloatVectorProperty(name="Applied", subtype="QUATERNION", size=4, default=(1.0, 0.0, 0.0, 0.0))
+    # How far the foot was moved when the heel went up, to keep the toes planted (armature space).
+    heel_shift: FloatVectorProperty(name="Shift", subtype="TRANSLATION", size=3)
     # The turn applied to the toes to keep them flat, in the toes' rest frame, to undo it later.
     toes_counter: FloatVectorProperty(name="Toes Counter", subtype="QUATERNION", size=4, default=(1.0, 0.0, 0.0, 0.0))
     # What the IK solver remembers (row-major matrices): the target it was given, the foot

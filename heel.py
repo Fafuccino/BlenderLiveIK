@@ -51,6 +51,7 @@ def clear(chain):
     try:
         chain.heel_pitch = chain.heel_roll = chain.heel_yaw = 0.0
         chain.heel_applied = IDENTITY_QUATERNION
+        chain.heel_shift = (0.0, 0.0, 0.0)
         chain.toes_counter = IDENTITY_QUATERNION
         chain.end_goal = chain.end_left = chain.end_basis_left = IDENTITY_MATRIX
         chain.end_parent_left = IDENTITY_MATRIX
@@ -161,8 +162,9 @@ def _refresh_toes(obj, chain, target, foot_matrix):
     if chain.chain_type != "LEG" or not is_rotated(chain):
         return
     rotation = Quaternion(chain.heel_applied)
-    pivot = target @ Vector(chain.heel_pos)
-    base = _about(pivot, rotation).inverted() @ target
+    raw = Matrix.Translation(-Vector(chain.heel_shift)) @ target
+    pivot = raw @ Vector(chain.heel_pos)
+    base = _about(pivot, rotation).inverted() @ raw
     _, _, foot, toes = _pose_bones(obj, chain)
     _counter_toes(obj, chain, foot_matrix, _forward_frame(base, foot, toes), rotation)
 
@@ -257,7 +259,7 @@ def pivot_offset(obj, chain):
     _, _, foot, _ = _pose_bones(obj, chain)
     if not foot:
         return Vector(chain.heel_pos)
-    target = end_target(obj, chain)
+    target = heel_raw(obj, chain)
     return handle_axes(obj, chain, "heel_pos").inverted() @ (target @ Vector(chain.heel_pos) - target.translation)
 
 
@@ -266,7 +268,7 @@ def set_pivot_offset(obj, chain, offset):
     if not foot:
         chain.heel_pos = offset
         return
-    target = end_target(obj, chain)
+    target = heel_raw(obj, chain)
     chain.heel_pos = target.inverted() @ (target.translation + handle_axes(obj, chain, "heel_pos") @ offset)
 
 
@@ -281,6 +283,15 @@ def set_pole_offset(obj, chain, offset):
     chain.pole_pos = anchor.inverted() @ (anchor.translation + handle_axes(obj, chain, "pole_pos") @ offset)
 
 
+def heel_raw(obj, chain):
+    """The foot target without the shift that going on toes adds (see _toes_shift).
+
+    The pivot is a point of this matrix, and the foot before the heel rotation is found from
+    it: the shift is a move that the rotation about the pivot does not account for.
+    """
+    return Matrix.Translation(-Vector(chain.heel_shift)) @ end_target(obj, chain)
+
+
 def heel_frame(obj, chain):
     """(pivot, frame, base) in armature space, or None.
 
@@ -291,7 +302,7 @@ def heel_frame(obj, chain):
     _, _, foot, toes = _pose_bones(obj, chain)
     if not foot:
         return None
-    target = end_target(obj, chain)
+    target = heel_raw(obj, chain)
     pivot = target @ Vector(chain.heel_pos)
     base = _about(pivot, Quaternion(chain.heel_applied)).inverted() @ target
     return pivot, _forward_frame(base, foot, toes), base
@@ -333,9 +344,33 @@ def _counter_toes(obj, chain, foot_matrix, frame, rotation):
     chain.toes_counter = local
 
 
-def apply_heel(obj, chain, rotation=None):
+def _toes_shift(chain, foot, toes, pivot, frame, base):
+    """How far the foot is moved so the toes stay planted when the heel is raised.
+
+    Raising the heel turns the foot about the pivot, which carries the toes along an arc:
+    down when the pivot is behind them, forward as well, up when it is beyond them. The
+    toes are what stands on the ground, so the whole foot is moved by whatever brings them
+    back to where they were: their height (along the armature's up axis, perpendicular to
+    its ground plane) and their place along the foot, so they do not slide. Without toes,
+    the tip of the foot stands in for them. Only the pitch counts: it is going on toes that
+    must not move the toes, while banking or swiveling the foot is free to. A raised toes
+    pitch changes nothing.
+    """
+    if chain.heel_pitch >= 0:
+        return Vector((0, 0, 0))
+    if toes and toes.parent == foot:
+        stand = (base @ _rest_rel(toes.bone)).translation  # the toes' head
+    else:
+        stand = base @ Vector((0, foot.bone.length, 0))  # the tip of the foot
+    pitch = (frame @ Matrix.Rotation(chain.heel_pitch, 3, "X") @ frame.inverted()).to_quaternion()
+    return stand - _about(pivot, pitch) @ stand
+
+
+def apply_heel(obj, chain, rotation=None, shift=None):
     """Rotate the foot about the pivot to the chain's pitch/roll/yaw (or to the given
-    rotation, in armature space) and pose the leg."""
+    rotation, in armature space) and pose the leg. The shift that keeps the toes planted is
+    worked out (see _toes_shift) unless given: a mirrored chain copies the one of the chain
+    it mirrors."""
     if suspended or chain.chain_type != "LEG" or not solving_enabled():
         return
     bpy.context.view_layer.update()  # make the pose bone matrices current
@@ -347,9 +382,13 @@ def apply_heel(obj, chain, rotation=None):
         rotation = _rotation(chain, frame)
     if not is_rotated(chain) and rotation.angle < 1e-6:
         return  # nothing applied, nothing asked: leave the user's pose alone
-    foot_matrix = solve_limb(obj, chain, _about(pivot, rotation) @ base)
+    _, _, foot, toes = _pose_bones(obj, chain)
+    if shift is None:
+        shift = _toes_shift(chain, foot, toes, pivot, frame, base)
+    foot_matrix = solve_limb(obj, chain, Matrix.Translation(shift) @ _about(pivot, rotation) @ base)
     if foot_matrix:
         chain.heel_applied = rotation
+        chain.heel_shift = shift
         _counter_toes(obj, chain, foot_matrix, frame, rotation)
         keying.request(obj, chain)
 
@@ -484,6 +523,7 @@ def mirror_chain(obj, chain):
             # Put the partner at the mirror of the foot without its heel rotation, then
             # mirror the heel angles: setting them applies the rotation on top.
             partner.heel_applied = IDENTITY_QUATERNION
+            partner.heel_shift = (0.0, 0.0, 0.0)
             solve_limb(obj, partner, _mirror_target(obj, chain, partner, state[2]))
             # The angles are only shown; the rotation itself is mirrored, so it stays right
             # when the foot was also turned by hand.
@@ -496,7 +536,8 @@ def mirror_chain(obj, chain):
             finally:
                 suspended = False
             q = Quaternion(chain.heel_applied)
-            apply_heel(obj, partner, Quaternion((q.w, q.x, -q.y, -q.z)))
+            shift = Vector(chain.heel_shift)
+            apply_heel(obj, partner, Quaternion((q.w, q.x, -q.y, -q.z)), shift=Vector((-shift.x, shift.y, shift.z)))
         else:
             solve_limb(obj, partner, _mirror_target(obj, chain, partner, end_target(obj, chain)))
 

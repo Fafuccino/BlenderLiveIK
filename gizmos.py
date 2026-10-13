@@ -30,7 +30,7 @@ def _chain(obj_name, index):
 def _anchor(obj, chain, prop):
     """Armature-space matrix the stored position is relative to."""
     if prop == "heel_pos":
-        return heel.end_target(obj, chain)
+        return heel.heel_raw(obj, chain)
     return pose_anchor(obj, chain, prop)
 
 
