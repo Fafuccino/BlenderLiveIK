@@ -1,6 +1,6 @@
 Eh, I'll have to write a proper README someday.
 
-Just download the .zip, install like any other addon. Once you select an armature and go to pose mode, a LiveIK tab should appear in the N-Panel (the panel that pops up when you press N in the 3D view)
+Just click Code then download the .zip, install like any other addon. Once you select an armature and go to pose mode, a LiveIK tab should appear in the N-Panel (the panel that pops up when you press N in the 3D view)
 
 Hopefully it'll be self explanatory. Yeah sorry it's really not interesting to write tutorials.. I know it's a pain when people don't write documentation for their tools, trust me I feel ya. But oh boy I understand those people as well.
 
