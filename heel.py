@@ -51,6 +51,7 @@ def clear(chain):
     try:
         chain.heel_pitch = chain.heel_roll = chain.heel_yaw = 0.0
         chain.heel_done = (0.0, 0.0, 0.0)
+        chain.heel_neutral = chain.heel_neutral_toes = chain.heel_last = chain.heel_last_toes = IDENTITY_MATRIX
         chain.end_goal = chain.end_left = chain.end_basis_left = IDENTITY_MATRIX
         chain.end_thigh_left = chain.end_calf_left = chain.end_root_left = IDENTITY_MATRIX
         chain.end_parent_left = IDENTITY_MATRIX
@@ -155,6 +156,23 @@ def end_target(obj, chain):
     if limb_untouched(obj, chain):
         return ik_parent_matrix(obj, chain) @ _mat(chain.end_goal)
     return _unscaled(foot.matrix)
+
+
+def rest_end_position(obj, chain):
+    """Where the foot or hand is when the rig is at rest, in armature space.
+
+    With an IK parent, that is relative to the parent: where the end sits when the parent is
+    at rest, carried along with the parent as it is posed now.
+    """
+    bone = obj.data.bones.get(chain.bone_2)
+    if not bone:
+        return None
+    rest = bone.head_local.copy()
+    name = valid_ik_parent(obj, chain)
+    if not name:
+        return rest
+    rest_parent = _unscaled(obj.data.bones[name].matrix_local)
+    return ik_parent_matrix(obj, chain) @ (rest_parent.inverted() @ rest)
 
 
 def move_end(obj, chain, target):
@@ -382,6 +400,10 @@ def apply_heel(obj, chain):
     pivot, frame, target = state
     _, _, foot, toes = _pose_bones(obj, chain)
 
+    # The frame follows the foot's direction, so it already includes the yaw the heel gave the
+    # foot. The angles are measured in the frame the foot had before that yaw, or the yaw would
+    # be counted twice and putting the sliders back in another order would not retrace the way.
+    frame = frame @ Matrix.Rotation(-old[2], 3, "Z")
     turn = _heel_rotation(frame, new) @ _heel_rotation(frame, old).inverted()
     follow = _toes_follow(frame, old, new)
     # The toes are meant to go only where `follow` takes them. The rest of the turn (the
@@ -391,10 +413,29 @@ def apply_heel(obj, chain):
     shift = _about(pivot, follow.to_quaternion()) @ stand - _about(pivot, turn.to_quaternion()) @ stand
 
     goal = Matrix.Translation(shift) @ _about(pivot, turn.to_quaternion()) @ target
+
+    # Turning the heel and turning it back are not exact opposites: the toes are planted where
+    # they are at the time, and rolling or swiveling carries them along an arc in between. So
+    # the way out of the heel is remembered, and sliders back at 0 take it, as long as nothing
+    # moved the foot since the heel last did.
+    was_zero = max(abs(a) for a in old) < 1e-7
+    if was_zero:
+        chain.heel_neutral = _flat(target)
+        chain.heel_neutral_toes = _flat(toes.matrix_basis) if toes else IDENTITY_MATRIX
+    back_to_neutral = max(abs(a) for a in new) < 1e-7 and not was_zero and _close(target, _mat(chain.heel_last))
+    if back_to_neutral:
+        goal = _mat(chain.heel_neutral)
+
     foot_matrix = solve_limb(obj, chain, goal)
     if foot_matrix:
         chain.heel_done = new
-        _counter_toes(obj, chain, foot_matrix, follow, turn)
+        toes_untouched = bool(toes) and toes.parent == foot and _close(toes.matrix_basis, _mat(chain.heel_last_toes))
+        if back_to_neutral and toes_untouched:
+            toes.matrix_basis = _mat(chain.heel_neutral_toes)
+        else:
+            _counter_toes(obj, chain, foot_matrix, follow, turn)
+        chain.heel_last = _flat(goal)
+        chain.heel_last_toes = _flat(toes.matrix_basis) if toes else IDENTITY_MATRIX
         keying.request(obj, chain)
 
 
@@ -410,6 +451,29 @@ def _swing(reference, local_vector, direction, position):
     rotation = reference.to_quaternion().to_matrix()
     turn = (rotation @ local_vector).rotation_difference(direction).to_matrix()
     return Matrix.Translation(position) @ (turn @ rotation).to_4x4()
+
+
+def _hinge(b0, b1, b2):
+    """The axis the knee (elbow) bends about in the rest pose, in the thigh's and the calf's
+    own coordinates, or None when the rest pose is too straight to tell."""
+    first = b1.head_local - b0.head_local
+    second = b2.head_local - b1.head_local
+    axis = first.cross(second)
+    if axis.length < 0.02 * first.length * second.length:
+        return None
+    return (
+        (b0.matrix_local.inverted().to_3x3() @ axis).normalized(),
+        (b1.matrix_local.inverted().to_3x3() @ axis).normalized(),
+    )
+
+
+def _aligned(position, along, hinge, direction, normal):
+    """Matrix at `position` that turns the bone's `along` axis to `direction` and its hinge
+    axis to `normal`. Both pairs are at right angles, so this is a plain rotation."""
+    along = along.normalized()
+    local = Matrix((along, hinge, along.cross(hinge))).transposed()
+    world = Matrix((direction, normal, direction.cross(normal))).transposed()
+    return Matrix.Translation(position) @ (world @ local.inverted()).to_4x4()
 
 
 def _set_basis(pose_bone, parent_matrix, desired):
@@ -453,11 +517,28 @@ def solve_limb(obj, chain, target):
         side -= toward * side.dot(toward)
     if side.length < 1e-6:
         side = toward.orthogonal()
-    mid = root + toward * along + side.normalized() * height
+    side.normalize()
+    if chain.pole_angle:
+        # The bend plane is turned about the line from the hip to the foot (like the IK
+        # constraint's pole angle): the knee swings around it.
+        side = Quaternion(toward, chain.pole_angle) @ side
+    mid = root + toward * along + side * height
+    foot_head = root + toward * distance
 
-    thigh_matrix = _swing(thigh_ref, to_calf, mid - root, root)
-    calf_ref = thigh_matrix @ _rest_rel(b1)
-    calf_matrix = _swing(calf_ref, to_foot, root + toward * distance - mid, mid)
+    hinge = _hinge(b0, b1, b2)
+    if hinge:
+        # The knee bends about its hinge, and only about it. The plane of the bend is the
+        # one through the hip, the knee and the foot; both bones are turned so that the
+        # hinge they had at rest lies across it. Whatever the foot does sideways is then
+        # taken by the hip, and the calf cannot lean to the side of the thigh.
+        normal = side.cross(toward).normalized()
+        thigh_matrix = _aligned(root, to_calf, hinge[0], (mid - root).normalized(), normal)
+        calf_matrix = _aligned(mid, to_foot, hinge[1], (foot_head - mid).normalized(), normal)
+    else:
+        # A limb straight at rest has no hinge to go by: the bones keep their twist.
+        thigh_matrix = _swing(thigh_ref, to_calf, mid - root, root)
+        calf_ref = thigh_matrix @ _rest_rel(b1)
+        calf_matrix = _swing(calf_ref, to_foot, foot_head - mid, mid)
     foot_matrix = Matrix.Translation(calf_matrix @ to_foot) @ target.to_quaternion().to_matrix().to_4x4()
 
     _set_basis(thigh, parent_matrix, thigh_matrix)
@@ -555,6 +636,7 @@ def mirror_pole(obj, chain):
         with no_mirroring():
             world = _mirror_point(pose_anchor(obj, chain, "pole_pos") @ Vector(chain.pole_pos))
             partner.pole_pos = pose_anchor(obj, partner, "pole_pos").inverted() @ world
+            partner.pole_angle = -chain.pole_angle  # mirrored, the swing goes the other way round
 
 
 def mirror_pivot(obj, chain):

@@ -164,6 +164,7 @@ class LIVEIK_OT_symmetrize(bpy.types.Operator):
         target.chain_type = source.chain_type
         target.bone_0, target.bone_1, target.bone_2, target.bone_3 = mirrored
         target.symmetric = source.symmetric
+        target.pole_angle = -source.pole_angle
         target.ik_parent = ""
         if source.ik_parent:
             # A parent without a counterpart (root, hips...) is shared by both sides.
@@ -198,9 +199,10 @@ class LIVEIK_PT_main(bpy.types.Panel):
         layout.prop(settings, "chain_count")
         layout.prop(context.window_manager, "live_ik_gizmo_mode", expand=True)
         layout.prop(context.window_manager, "live_ik_orientation", expand=True)
-        row = layout.row()
-        row.active = context.window_manager.live_ik_gizmo_mode == "MOVE"  # the dials live in Move mode
-        row.prop(context.window_manager, "live_ik_show_heels")
+        col = layout.column(align=True)
+        col.active = context.window_manager.live_ik_gizmo_mode == "MOVE"  # these handles live in Move mode
+        col.prop(context.window_manager, "live_ik_show_ends")
+        col.prop(context.window_manager, "live_ik_show_heels")
 
         off = context.window_manager.live_ik_gizmo_mode == "OFF"
         for i, chain in enumerate(settings.chains):
@@ -242,6 +244,7 @@ class LIVEIK_PT_main(bpy.types.Panel):
 
             col = box.column(align=True)
             col.prop(chain, "pole_offset", text="Pole")
+            col.prop(chain, "pole_angle")
 
             if chain.chain_type == "LEG":
                 col.prop(chain, "heel_offset", text="Pivot")
@@ -256,6 +259,64 @@ class LIVEIK_PT_main(bpy.types.Panel):
                 col.prop(chain, "heel_yaw")
 
 
+# The keys the add-on adds in Pose Mode, as (key, what it does). Shown in the Keybinds panel.
+_KEYBINDS = (
+    ("G", "Move the IK target of a foot or hand, or the pole when the thigh or calf (arm or forearm) is selected"),
+    ("Alt+G", "Put the IK target back at its rest position, or the pole at its default"),
+    ("E", "Turn the heel of a foot about its pivot"),
+    ("Ctrl+Alt+E", "Reset the heel"),
+)
+_KEYBIND_MODAL = (
+    ("X / Y / Z", "Constrain to an axis (again: local). Shift+X / Y / Z: to the plane. While turning the heel: pitch / roll / yaw"),
+    ("Shift", "Precision"),
+    ("LMB / Enter", "Confirm"),
+    ("Esc / RMB", "Cancel"),
+)
+
+
+class LIVEIK_PT_keys(bpy.types.Panel):
+    bl_label = "Keybinds"
+    bl_idname = "LIVEIK_PT_keys"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "LiveIK"
+    bl_parent_id = "LIVEIK_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def _table(self, layout, rows):
+        column = layout.column(align=True)
+        for key, text in rows:
+            split = column.split(factor=0.32, align=True)
+            split.label(text=key)
+            # A long text wraps onto several lines of the narrow side panel.
+            lines = self._wrap(text, 30)
+            box = split.column(align=True)
+            for line in lines:
+                box.label(text=line)
+
+    @staticmethod
+    def _wrap(text, width):
+        lines, line = [], ""
+        for word in text.split():
+            if line and len(line) + 1 + len(word) > width:
+                lines.append(line)
+                line = word
+            else:
+                line = f"{line} {word}".strip()
+        return lines + [line] if line else lines
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="In Pose Mode, with IK on for the chain:")
+        self._table(layout, _KEYBINDS)
+        layout.separator()
+        layout.label(text="While moving or turning:")
+        self._table(layout, _KEYBIND_MODAL)
+        layout.separator()
+        layout.label(text="Only when every selected bone belongs to an IK chain.")
+        layout.label(text="Otherwise the keys are Blender's own.")
+
+
 classes = (
     LIVEIK_OT_reset_gizmos,
     LIVEIK_OT_reset_heel,
@@ -263,6 +324,7 @@ classes = (
     LIVEIK_OT_key_chain,
     LIVEIK_OT_symmetrize,
     LIVEIK_PT_main,
+    LIVEIK_PT_keys,
 )
 
 

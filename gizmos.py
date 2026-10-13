@@ -238,9 +238,12 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
     def _show_heels(self):
         return bpy.context.window_manager.live_ik_show_heels
 
+    def _show_ends(self):
+        return bpy.context.window_manager.live_ik_show_ends
+
     def _key(self, obj):
         chains = tuple((c.chain_type, c.visible) for c in obj.live_ik.chains)
-        return (obj.name, self._mode(), self._show_heels(), chains)
+        return (obj.name, self._mode(), self._show_ends(), self._show_heels(), chains)
 
     def refresh(self, context):
         obj = context.object
@@ -260,7 +263,8 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
             if mode == "SETUP" and leg:
                 self._add_position_handle(obj, i, "heel_pos")
             elif mode == "MOVE":
-                self._add_position_handle(obj, i, "end")
+                if self._show_ends():
+                    self._add_position_handle(obj, i, "end")
                 self._add_position_handle(obj, i, "pole_pos")
                 if leg and self._show_heels():
                     self._add_dials(obj, i)

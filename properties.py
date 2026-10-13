@@ -131,9 +131,9 @@ def pose_anchor(obj, chain, prop):
     return _unscaled(pose_bone.matrix) if pose_bone else Matrix.Identity(4)
 
 
-def compute_defaults(obj, chain):
-    """Place the pole and heel from the rest pose. Stored relative to their anchor bone."""
-    b0, b1, b2, b3 = _bones(obj, chain)
+def default_pole(obj, chain):
+    """Put the pole where it is by default: on the side the limb bends toward at rest."""
+    b0, b1, b2, _ = _bones(obj, chain)
     if not (b0 and b1 and b2):
         return
     root, mid, end = b0.head_local, b1.head_local, b2.head_local
@@ -145,7 +145,16 @@ def compute_defaults(obj, chain):
         bend = Vector((0, 1, 0)) if chain.chain_type == "ARM" else Vector((0, -1, 0))
     pole = mid + bend.normalized() * length * 0.5
     chain.pole_pos = rest_anchor(obj, chain, "pole_pos").inverted() @ pole
+    chain.pole_angle = 0.0
     chain.pole_anchor = _anchor_name(obj, chain, "pole_pos") or ""
+
+
+def compute_defaults(obj, chain):
+    """Place the pole and heel from the rest pose. Stored relative to their anchor bone."""
+    b0, b1, b2, b3 = _bones(obj, chain)
+    if not (b0 and b1 and b2):
+        return
+    default_pole(obj, chain)
 
     if chain.chain_type == "LEG":
         low = min(b2.head_local.z, b2.tail_local.z)
@@ -298,6 +307,12 @@ class LiveIKChain(bpy.types.PropertyGroup):
     # are what the panel shows and edits: the same point along the gizmo's axes.
     pole_pos: FloatVectorProperty(name="IK Pole", subtype="TRANSLATION", size=3, update=_on_pole_changed)
     heel_pos: FloatVectorProperty(name="IK Heel Pivot", subtype="TRANSLATION", size=3, update=_on_pivot_changed)
+    pole_angle: FloatProperty(
+        name="Pole Angle",
+        description="Turns the bend of the knee or elbow around the line from the hip to the foot",
+        subtype="ANGLE",
+        update=_on_pole_changed,
+    )
     pole_offset: FloatVectorProperty(
         name="IK Pole",
         description="From the bone the pole follows, along the armature's axes",
@@ -322,6 +337,12 @@ class LiveIKChain(bpy.types.PropertyGroup):
     # The rotation currently applied to the foot (armature space), to undo it when it changes.
     # The pitch / roll / yaw the foot has been turned by so far: a change of the sliders turns it by the difference.
     heel_done: FloatVectorProperty(name="Done", size=3)
+    # The foot target and the toes' pose from before the heel was first turned, and what the
+    # heel left them as: sliders back at 0 return to the first when nothing touched the second.
+    heel_neutral: FloatVectorProperty(name="Neutral", size=16, default=IDENTITY_MATRIX)
+    heel_neutral_toes: FloatVectorProperty(name="Neutral Toes", size=16, default=IDENTITY_MATRIX)
+    heel_last: FloatVectorProperty(name="Last", size=16, default=IDENTITY_MATRIX)
+    heel_last_toes: FloatVectorProperty(name="Last Toes", size=16, default=IDENTITY_MATRIX)
     # What the IK solver remembers (row-major matrices): the target it was given, the foot
     # matrix it left in armature space, and the foot's local pose it left. See heel.end_target.
     end_goal: FloatVectorProperty(name="Foot Goal", size=16, default=IDENTITY_MATRIX)
@@ -394,6 +415,12 @@ def register():
         default="HIDE",
         update=_on_mode_changed,
     )
+    bpy.types.WindowManager.live_ik_show_ends = BoolProperty(
+        name="Show Ends",
+        description="In Move mode, show the handles that move each foot or hand (G does the same with the bone selected)",
+        default=True,
+        update=_redraw,
+    )
     bpy.types.WindowManager.live_ik_show_heels = BoolProperty(
         name="Show Heels",
         description="In Move mode, show the heel dials that rotate each foot around its pivot",
@@ -417,6 +444,7 @@ def register():
 def unregister():
     del bpy.types.WindowManager.live_ik_orientation
     del bpy.types.WindowManager.live_ik_show_heels
+    del bpy.types.WindowManager.live_ik_show_ends
     del bpy.types.WindowManager.live_ik_gizmo_mode
     del bpy.types.Object.live_ik
     for cls in reversed(classes):

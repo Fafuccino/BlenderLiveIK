@@ -14,7 +14,7 @@ from bpy.app.handlers import persistent
 from . import properties, ui
 
 KEY = "live_ik_ui"
-_SETTINGS = ("live_ik_gizmo_mode", "live_ik_orientation", "live_ik_show_heels")
+_SETTINGS = ("live_ik_gizmo_mode", "live_ik_orientation", "live_ik_show_ends", "live_ik_show_heels")
 
 
 def _collect(wm):
