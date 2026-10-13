@@ -40,7 +40,7 @@ def load():
     except ValueError:
         return
     wm = bpy.context.window_manager
-    properties.restoring = True  # putting a mode back must not run what changing it does
+    properties.quiet = True  # putting a mode back must not run what changing it does
     try:
         for name in _SETTINGS:
             if name in data:
@@ -49,7 +49,7 @@ def load():
                 except (TypeError, ValueError):
                     pass  # a mode this version does not have
     finally:
-        properties.restoring = False
+        properties.quiet = False
     ui._expanded.clear()
     ui._expanded.update((name, index) for name, index in data.get("expanded", []))
 

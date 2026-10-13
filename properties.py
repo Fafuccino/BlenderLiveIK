@@ -170,7 +170,7 @@ def _on_symmetric_changed(self, context):
     _redraw(self, context)
 
 
-restoring = False  # True while the saved panel state is put back (see state.py)
+quiet = False  # True while values are put back or renamed by the add-on itself (state.py, names.py)
 
 
 def _on_mode_changed(self, context):
@@ -178,7 +178,7 @@ def _on_mode_changed(self, context):
     left them, so when it is switched back on it takes over from the pose as it is then."""
     from . import heel
 
-    if restoring:
+    if quiet:
         return
     if context.window_manager.live_ik_gizmo_mode == "OFF":
         for obj in bpy.data.objects:
@@ -212,6 +212,8 @@ def _on_pole_changed(self, context):
 def _on_chain_changed(self, context):
     from . import heel
 
+    if quiet:
+        return
     obj = context.object
     if obj and obj.type == "ARMATURE":
         with heel.no_mirroring():  # setting a chain up must not overwrite its partner
@@ -233,6 +235,8 @@ def _on_heel_changed(self, context):
 def _on_ik_parent_changed(self, context):
     from . import heel
 
+    if quiet:
+        return
     obj = context.object
     if obj and obj.type == "ARMATURE":
         with heel.no_mirroring():
