@@ -30,7 +30,7 @@ def _chain(obj_name, index):
 def _anchor(obj, chain, prop):
     """Armature-space matrix the stored position is relative to."""
     if prop == "heel_pos":
-        return heel.heel_raw(obj, chain)
+        return heel.end_target(obj, chain)
     return pose_anchor(obj, chain, prop)
 
 
@@ -282,8 +282,17 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
 
         world = obj.matrix_world
         world_rot = _world_rotation(obj)
+        dial_turning = any(kind == "dial" and gz.is_modal for kind, gz, _, _ in self._handles)
         for kind, gz, target, axis in self._handles:
             if kind == "dial":
+                # While a dial is turned, only that one is shown, and it holds still. A dial
+                # reads its angle from the mouse relative to its own position and orientation.
+                # The foot moves while it is turned (the toes are planted, the frame follows
+                # its direction), so a dial that followed it would feed that movement back
+                # into the angle it reads, and the foot would keep going.
+                gz.hide = dial_turning and not gz.is_modal
+                if dial_turning:
+                    continue
                 _, chain = _chain(*target)
                 state = heel.heel_frame(obj, chain) if chain else None
                 if not state:

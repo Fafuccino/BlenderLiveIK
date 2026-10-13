@@ -320,17 +320,18 @@ class LiveIKChain(bpy.types.PropertyGroup):
     heel_roll: FloatProperty(name="Roll", subtype="ANGLE", description="Bank the foot", update=_on_heel_changed)
     heel_yaw: FloatProperty(name="Yaw", subtype="ANGLE", description="Swivel the foot", update=_on_heel_changed)
     # The rotation currently applied to the foot (armature space), to undo it when it changes.
-    heel_applied: FloatVectorProperty(name="Applied", subtype="QUATERNION", size=4, default=(1.0, 0.0, 0.0, 0.0))
-    # How far the foot was moved when the heel went up, to keep the toes planted (armature space).
-    heel_shift: FloatVectorProperty(name="Shift", subtype="TRANSLATION", size=3)
-    # The turn applied to the toes to keep them flat, in the toes' rest frame, to undo it later.
-    toes_counter: FloatVectorProperty(name="Toes Counter", subtype="QUATERNION", size=4, default=(1.0, 0.0, 0.0, 0.0))
+    # The pitch / roll / yaw the foot has been turned by so far: a change of the sliders turns it by the difference.
+    heel_done: FloatVectorProperty(name="Done", size=3)
     # What the IK solver remembers (row-major matrices): the target it was given, the foot
     # matrix it left in armature space, and the foot's local pose it left. See heel.end_target.
     end_goal: FloatVectorProperty(name="Foot Goal", size=16, default=IDENTITY_MATRIX)
     end_left: FloatVectorProperty(name="Foot Left", size=16, default=IDENTITY_MATRIX)
     end_basis_left: FloatVectorProperty(name="Foot Basis Left", size=16, default=IDENTITY_MATRIX)
     end_parent_left: FloatVectorProperty(name="Foot Parent Left", size=16, default=IDENTITY_MATRIX)
+    # The pose of thigh and calf the solver left, and the matrix of the bone they hang from.
+    end_thigh_left: FloatVectorProperty(name="Thigh Left", size=16, default=IDENTITY_MATRIX)
+    end_calf_left: FloatVectorProperty(name="Calf Left", size=16, default=IDENTITY_MATRIX)
+    end_root_left: FloatVectorProperty(name="Root Left", size=16, default=IDENTITY_MATRIX)
     # The bone the pole was last measured from, to move it when that changes.
     pole_anchor: StringProperty(name="Pole Anchor")
     ik_parent: StringProperty(
