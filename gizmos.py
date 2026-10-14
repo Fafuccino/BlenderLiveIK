@@ -110,16 +110,39 @@ def _arrow_accessors(mover, axis):
     return get, set_
 
 
-def _dial_accessors(obj_name, index, prop):
-    # The dials turn the opposite way to the stored angles, so the drag matches the foot.
+class _DialDrag:
+    """Where a dial's drag started: the angles, the frame they are measured in and the axis (armature
+    space). The foot moves while it is turned, and an axis that followed it would turn with it."""
+
+    def __init__(self):
+        self.start = None
+
+    def end(self):
+        self.start = None
+
+
+def _dial_accessors(obj_name, index, axis, drag):
+    # A dial is an angle from where its drag began, about the axis it is drawn on: the scene's
+    # (World), the armature's (Rig) or the foot's own as it is posed (Local).
     def get():
-        _, chain = _chain(obj_name, index)
-        return -float(getattr(chain, prop)) if chain else 0.0
+        return 0.0
 
     def set_(value):
-        _, chain = _chain(obj_name, index)
-        if chain:
-            setattr(chain, prop, -value)
+        obj, chain = _chain(obj_name, index)
+        if not chain:
+            return
+        if drag.start is None:
+            axes = heel.orientation_axes(obj, chain)
+            drag.start = (
+                (chain.heel_pitch, chain.heel_roll, chain.heel_yaw),
+                heel.angle_frame(obj, chain),
+                axes.col[axis].normalized(),
+            )
+        start, frame, direction = drag.start
+        # The dials turn the opposite way to the angle they report, so the drag matches the foot.
+        for name, angle in zip(DIAL_PROPS, heel.angles_after_turn(frame, start, direction, -value)):
+            if abs(getattr(chain, name) - angle) > 1e-9:
+                setattr(chain, name, angle)
 
     return get, set_
 
@@ -235,9 +258,10 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
             dial.line_width = 3
             dial.use_draw_modal = True
             self._style(dial, AXIS_COLORS[axis])
-            get, set_ = _dial_accessors(obj.name, index, prop)
+            drag = _DialDrag()
+            get, set_ = _dial_accessors(obj.name, index, axis, drag)
             dial.target_set_handler("offset", get=get, set=set_)
-            self._handles.append(("dial", dial, (obj.name, index), axis))
+            self._handles.append(("dial", dial, (obj.name, index, drag), axis))
 
     def setup(self, context):
         self._handles = []
@@ -314,11 +338,14 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
                 gz.hide = dial_turning and not gz.is_modal
                 if dial_turning:
                     continue
-                _, chain = _chain(*target)
+                if not gz.is_modal:
+                    target[2].end()  # the drag is over, whatever ended it
+                _, chain = _chain(target[0], target[1])
                 state = heel.heel_frame(obj, chain) if chain else None
                 if not state:
                     continue
-                position, direction = state[0], state[1].col[axis]
+                # The axes follow the panel's orientation: the foot's own in Local.
+                position, direction = state[0], heel.orientation_axes(obj, chain).col[axis]
                 rot = (world_rot @ direction).to_track_quat("Z", "Y").to_matrix().to_4x4()
             else:
                 mover = target

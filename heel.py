@@ -15,7 +15,7 @@ from math import sqrt
 from contextlib import contextmanager
 
 import bpy
-from mathutils import Matrix, Quaternion, Vector
+from mathutils import Euler, Matrix, Quaternion, Vector
 
 from . import keying
 from .properties import (
@@ -349,6 +349,17 @@ def forget_heel(chain):
         suspended = False
 
 
+def sole_plane(obj, chain):
+    """The rotation that tilts the world's ground to the sole of the foot as it is posed now.
+
+    The heel works against a plane it calls the ground: the world's, when the foot is flat, which
+    is all a foot in its rest pose has. A foot that is posed (raised, banked, pitched) lies on a
+    plane of its own, and pitch, roll and yaw mean what they say about that plane, not about the
+    world's. Only valid while the heel is flat: after that the foot is turned on the plane.
+    """
+    return Vector((0.0, 0.0, 1.0)).rotation_difference(foot_axes(obj, chain).col[2])
+
+
 def heel_frame(obj, chain):
     """(pivot, frame, target) in armature space, or None.
 
@@ -364,18 +375,11 @@ def heel_frame(obj, chain):
     target = end_target(obj, chain)
     has_toes = bool(toes) and toes.parent == foot
     plane = Quaternion(chain.heel_plane)
-    if (
-        has_toes
-        and plane.angle > 1e-6
-        and (
-            at_rest(obj, chain, toes, target)
-            or (
-                not is_rotated(chain)
-                and not (_close(target, _mat(chain.heel_last)) and _close(toes.matrix_basis, _mat(chain.heel_last_toes)))
-            )
-        )
-    ):
-        plane = Quaternion()  # the pose was reset (Alt+R, Alt+G...): the sole plane is the ground again
+    if has_toes:
+        if not is_rotated(chain):
+            plane = sole_plane(obj, chain)  # the heel is flat: it works against the sole as the foot is posed
+        elif plane.angle > 1e-6 and at_rest(obj, chain, toes, target):
+            plane = Quaternion()  # the pose was reset (Alt+R, Alt+G...): the sole plane is the ground again
     plane = plane.to_matrix() if has_toes else Matrix.Identity(3)
     frame = plane @ _forward_frame(target, foot, toes, plane.inverted())
     return target @ Vector(chain.heel_pos), frame, target
@@ -386,6 +390,65 @@ def _heel_rotation(frame, angles):
     pitch, roll, yaw = angles
     local = Matrix.Rotation(yaw, 3, "Z") @ Matrix.Rotation(roll, 3, "Y") @ Matrix.Rotation(pitch, 3, "X")
     return frame @ local @ frame.inverted()
+
+
+def foot_axes(obj, chain):
+    """The foot's own axes as it is posed now (columns of a 3x3, armature space): X right, Y toward
+    the toes, Z out of the sole.
+
+    In the rest pose they are the ground frame (see ground_frame), which is why that is the
+    frame the heel angles are measured in. Once the foot is posed they follow it: the rest
+    ground frame turned by the rotation the foot has from its rest pose. A foot that is raised,
+    banked or pitched has axes that say so, where the ground frame always has Z up.
+    """
+    _, _, foot, toes = _pose_bones(obj, chain)
+    if not foot:
+        return Matrix.Identity(3)
+    bone = foot.bone
+    rest = bone.matrix_local.to_3x3().normalized()
+    directions = []
+    if toes and toes.parent == foot:
+        directions.append(toes.bone.tail_local - toes.bone.head_local)
+        directions.append(toes.bone.head_local - bone.head_local)
+    directions.append(rest.col[1].to_3d())
+    rest_ground = ground_frame(directions)
+    return (end_target(obj, chain).to_3x3() @ rest.inverted() @ rest_ground).normalized()
+
+
+def space_axes(obj, space, chain=None):
+    """The axes the heel is turned about: the columns of a 3x3 in armature space. World is the
+    scene's, Rig the armature's, Local the foot's own (see foot_axes) for the chain given."""
+    if space == "WORLD":
+        return obj.matrix_world.to_quaternion().to_matrix().inverted()  # the scene's axes, seen from the armature
+    if space == "RIG":
+        return Matrix.Identity(3)
+    return foot_axes(obj, chain) if chain is not None else None
+
+
+def orientation_axes(obj, chain=None):
+    """space_axes for the panel's orientation."""
+    return space_axes(obj, bpy.context.window_manager.live_ik_orientation, chain)
+
+
+def angle_frame(obj, chain):
+    """The frame (3x3, armature space) pitch, roll and yaw are measured in, as apply_heel uses it:
+    the foot's ground frame without the yaw the heel has given it so far."""
+    state = heel_frame(obj, chain)
+    return state[1] @ Matrix.Rotation(-chain.heel_done[2], 3, "Z") if state else Matrix.Identity(3)
+
+
+def angles_after_turn(frame, start, axis, angle):
+    """The (pitch, roll, yaw) that turn the foot by `angle` about `axis` (armature space) on top of
+    what `start` already does, for a heel measured in `frame` (see angle_frame).
+
+    The heel's turn is frame @ rotation(angles) @ frame^-1, so the angles that make a given turn
+    are the Euler angles of that rotation seen in the frame. Euler angles are not unique: the ones
+    nearest to `start` are taken, so a drag does not flip from one equivalent set to another."""
+    pitch, roll, yaw = start
+    now = Matrix.Rotation(yaw, 3, "Z") @ Matrix.Rotation(roll, 3, "Y") @ Matrix.Rotation(pitch, 3, "X")
+    wanted = frame.inverted() @ Matrix.Rotation(angle, 3, axis) @ frame @ now
+    euler = wanted.to_euler("XYZ", Euler(start, "XYZ"))
+    return euler.x, euler.y, euler.z
 
 
 def _toes_stand(foot, toes, target):
@@ -469,18 +532,10 @@ def apply_heel(obj, chain):
             suspended = False
 
     was_zero = max(abs(a) for a in old) < 1e-5
-    if was_zero and Quaternion(chain.heel_plane).angle > 1e-6:
-        # The heel is back at 0 and starts again. The sole plane it left is still the one
-        # the foot lies on, if nothing touched the foot or the toes in between.
-        target = end_target(obj, chain)
-        untouched = (
-            has_toes
-            and not _close(toes.matrix_basis, IDENTITY_MATRIX_4)
-            and _close(target, _mat(chain.heel_last))
-            and _close(toes.matrix_basis, _mat(chain.heel_last_toes))
-        )
-        if not untouched:
-            chain.heel_plane = IDENTITY_QUATERNION
+    if was_zero and has_toes:
+        # The heel starts: the plane it works against is the sole of the foot as it is posed,
+        # and it stays that plane until the heel is back at 0.
+        chain.heel_plane = sole_plane(obj, chain)
     pivot, frame, target = heel_frame(obj, chain)
 
     # The virtual world: the real one turned about the toes' head until the sole plane is

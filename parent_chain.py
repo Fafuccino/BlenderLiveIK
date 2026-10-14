@@ -31,7 +31,7 @@ import gpu
 from bpy.props import EnumProperty
 from bpy_extras import view3d_utils
 from gpu_extras.batch import batch_for_shader
-from mathutils import Matrix, Quaternion, Vector
+from mathutils import Matrix, Vector
 
 from . import grab, heel, keying
 from .properties import _unscaled
@@ -247,15 +247,8 @@ class _TransformOperator(bpy.types.Operator):
         return Vector(tuple(1.0 if i == self.axis else 0.0 for i in range(3)))
 
     def _trackball(self):
-        """The trackball rotation, as Blender works it out (transform_mode_trackball.cc).
-
-        The mouse's distance from where the trackball began, 0.01 radian per pixel (down about the
-        view's horizontal axis, right about its vertical one), makes one rotation: the axis is the
-        two axes weighted by those angles and the angle is the length of that. It is a function of
-        where the mouse is, not a sum of its steps, so going round in circles brings it back."""
-        axis = self.right * (-self.virtual.y * 0.01) + self.up * (self.virtual.x * 0.01)
-        angle = axis.length
-        return Quaternion(axis / angle, angle) if angle > 1e-9 else Quaternion()
+        """The trackball rotation (see grab.trackball_rotation)."""
+        return grab.trackball_rotation(self.right, self.up, self.virtual)
 
     def _transform(self, pivot=None):
         """The change, as a world-space matrix, about the pivot (the one chosen, unless given)."""
@@ -401,33 +394,11 @@ class _TransformOperator(bpy.types.Operator):
             else:
                 context.window.cursor_modal_restore()
 
-    def _draw_trackball_cursor(self):
-        """Blender's trackball helper at the mouse: arrows across (red) and up and down (green)."""
-        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
-        region = bpy.context.region
-        shader.uniform_float("viewportSize", (region.width, region.height))
-        shader.uniform_float("lineWidth", 2.0)
-        gpu.state.blend_set("ALPHA")
-        centre = self.mouse
-        gap, length, head = 5.0, 16.0, 5.0
-        for direction, color in ((Vector((1.0, 0.0)), _AXIS_COLORS[0]), (Vector((0.0, 1.0)), _AXIS_COLORS[1])):
-            across = Vector((-direction.y, direction.x))
-            segments = []
-            for sign in (1.0, -1.0):
-                start, tip = centre + direction * gap * sign, centre + direction * length * sign
-                segments += [start, tip]
-                for side in (1.0, -1.0):
-                    segments += [tip, tip - direction * head * sign + across * head * side]
-            shader.uniform_float("color", color)
-            points = [(point.x, point.y, 0.0) for point in segments]
-            batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)
-        gpu.state.blend_set("NONE")
-
     def _draw_cursor(self):
         """The dashed line from the pivot to the mouse, with the arrow at the mouse that says
         which way it is read: across the line to rotate, along it to scale (like Blender's)."""
         if self.mode == "ROTATE" and self.trackball:
-            self._draw_trackball_cursor()
+            grab.draw_trackball_cursor(self.mouse)
             return
         if self.mode == "TRANSLATE":
             return

@@ -26,7 +26,7 @@ import bpy
 import gpu
 from gpu_extras.batch import batch_for_shader
 from bpy_extras import view3d_utils
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector, geometry
 
 from . import heel
 from .properties import default_pole, pose_anchor
@@ -146,6 +146,42 @@ def restore(obj, saved):
 
 _AXIS_COLORS = ((0.9, 0.25, 0.3, 1.0), (0.5, 0.8, 0.2, 1.0), (0.3, 0.5, 0.95, 1.0))  # X, Y, Z
 _LINE_LENGTH = 1000.0
+
+
+def trackball_rotation(right, up, moved):
+    """The trackball rotation, as Blender works it out (transform_mode_trackball.cc).
+
+    `moved` is how far the mouse has gone since the trackball began, in pixels. 0.01 radian per
+    pixel (down about the view's horizontal axis `right`, right about its vertical one `up`) makes
+    one rotation: the axis is the two axes weighted by those angles and the angle is the length of
+    that. It is a function of where the mouse is, not a sum of its steps, so going round in circles
+    brings it back."""
+    axis = right * (-moved.y * 0.01) + up * (moved.x * 0.01)
+    angle = axis.length
+    return Quaternion(axis / angle, angle) if angle > 1e-9 else Quaternion()
+
+
+def draw_trackball_cursor(centre):
+    """Blender's trackball helper at the mouse (region pixels): arrows across (red) and up and
+    down (green). The system cursor is hidden while it is shown."""
+    shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+    region = bpy.context.region
+    shader.uniform_float("viewportSize", (region.width, region.height))
+    shader.uniform_float("lineWidth", 2.0)
+    gpu.state.blend_set("ALPHA")
+    gap, length, head = 5.0, 16.0, 5.0
+    for direction, color in ((Vector((1.0, 0.0)), _AXIS_COLORS[0]), (Vector((0.0, 1.0)), _AXIS_COLORS[1])):
+        across = Vector((-direction.y, direction.x))
+        segments = []
+        for sign in (1.0, -1.0):
+            start, tip = centre + direction * gap * sign, centre + direction * length * sign
+            segments += [start, tip]
+            for side in (1.0, -1.0):
+                segments += [tip, tip - direction * head * sign + across * head * side]
+        shader.uniform_float("color", color)
+        points = [(point.x, point.y, 0.0) for point in segments]
+        batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)
+    gpu.state.blend_set("NONE")
 
 
 def constrain(delta, axis, plane, direction):
@@ -368,7 +404,7 @@ class LIVEIK_OT_heel_rotate(bpy.types.Operator):
     bl_label = "Turn Heel"
     bl_description = (
         "With IK on, turn the selected foot about its heel pivot: pitch (raise the heel or the toes), "
-        "or roll and yaw. X / Y / Z pick pitch / roll / yaw, Shift is for precision"
+        "or roll and yaw. X / Y / Z pick the axis (again for the other space), E again is the trackball, Shift is for precision"
     )
     bl_options = {"UNDO", "BLOCKING", "GRAB_CURSOR"}
 
@@ -395,65 +431,200 @@ class LIVEIK_OT_heel_rotate(bpy.types.Operator):
         # Where the pivot is and which way the axes point, kept from the start: the foot moves
         # while it is turned, and a centre or an axis that followed it would feed that
         # movement back into the angle that is read from the mouse.
-        world_rotation = obj.matrix_world.to_quaternion().to_matrix()
-        self.centers, self.axes = [], []
+        self.world_rotation = obj.matrix_world.to_quaternion().to_matrix()
+        self.centers, self.feet, self.frames = [], [], []
+        # The foot is turned about the panel's orientation: the scene's axes (World), the armature's
+        # (Rig) or the foot's own as it is posed (Local). Pressing the axis key again swaps it with
+        # Local (or with World, when it started as Local).
+        self.start_space = context.window_manager.live_ik_orientation
+        self.space = self.start_space
+        self.pressed = False  # an axis has been picked with its key
         for chain in chains:
-            pivot, frame, _ = heel.heel_frame(obj, chain)
+            pivot, _, _ = heel.heel_frame(obj, chain)
             self.centers.append(obj.matrix_world @ pivot)
-            self.axes.append([(world_rotation @ frame.col[i]).normalized() for i in range(3)])
+            self.feet.append(heel.foot_axes(obj, chain))  # its own axes, kept from the start
+            self.frames.append(heel.angle_frame(obj, chain))  # what the angles are measured in
         region, view = context.region, context.region_data
         center = view3d_utils.location_3d_to_region_2d(region, view, self.centers[0])
         self.center2d = center if center is not None else self._mouse(event)
         viewer = view.view_matrix.inverted().translation
         self.toward = [(viewer - c).normalized() for c in self.centers]
         self.axis = 0  # pitch, the one that is used most
-        self.angle = 0.0  # how far the mouse has gone round the pivot
+        self.angle = 0.0  # how far the mouse has gone round the axis
         self.sideways = 0.0  # and how far across, for an axis seen edge-on
         self.last = self._mouse(event) - self.center2d
+        self.last_plane = self._plane_point(context, event)
+        # E again: the trackball, as Blender's (see trackball_rotation), turning about the view's own axes.
+        self.trackball = False
+        self.virtual = Vector((0.0, 0.0))  # how far the mouse has gone since the trackball began, in pixels
+        self._cursor = None
+        view_axes = view.view_matrix.inverted().to_3x3()
+        self.right, self.up = view_axes.col[0].normalized(), view_axes.col[1].normalized()
+        self.mouse = self._mouse(event)
+        self._axis_handle = bpy.types.SpaceView3D.draw_handler_add(self._draw_axis, (), "WINDOW", "POST_VIEW")
         context.window_manager.modal_handler_add(self)
         self._status(context)
         return {"RUNNING_MODAL"}
+
+    def _axis(self, obj, number):
+        """The axis the heel is turned about, in armature space (for the chain's number)."""
+        orient = heel.space_axes(obj, self.space)
+        return (self.feet[number] if orient is None else orient).col[self.axis].normalized()
+
+    def _edge_on(self, obj):
+        """True when the axis is seen (nearly) edge-on: the mouse can not go round it on the screen."""
+        axis = self.world_rotation @ self._axis(obj, 0)
+        return abs(axis.dot(self.toward[0])) < 0.15
+
+    def _plane_point(self, context, event):
+        """Where the mouse is on the plane across the axis through the pivot, relative to the pivot,
+        or None. The angle the foot is turned by is the angle this goes round the axis: the true turn
+        in space, as for Blender's own dials, so it is the same whichever way the view looks."""
+        obj = self._object()
+        if not obj:
+            return None
+        coord = (event.mouse_region_x, event.mouse_region_y)
+        region, view = context.region, context.region_data
+        axis = self.world_rotation @ self._axis(obj, 0)
+        origin = view3d_utils.region_2d_to_origin_3d(region, view, coord)
+        direction = view3d_utils.region_2d_to_vector_3d(region, view, coord)
+        if abs(direction.dot(axis)) < 0.1:
+            return None  # the plane is seen edge-on: the mouse says nothing about where it is on it
+        hit = geometry.intersect_line_plane(origin, origin + direction, self.centers[0], axis)
+        return hit - self.centers[0] if hit else None
 
     def _apply(self, context):
         obj = self._object()
         if not obj:
             return
+        if self.trackball:
+            axis, turn = trackball_rotation(self.right, self.up, self.virtual).to_axis_angle()
+            axis = self.world_rotation.inverted() @ axis  # armature space, for every chain
+        else:
+            turn = self.sideways / 200.0 if self._edge_on(obj) else self.angle
         for number, index in enumerate(self.indices):
             chain = obj.live_ik.chains[index]
-            sign = facing_sign(self.axes[number][self.axis], self.toward[number])
-            turn = self.angle * sign if sign else self.sideways / 200.0
-            for i, prop in enumerate(_HEEL_PROPS):
-                value = self.starts[number][i] + (turn if i == self.axis else 0.0)
+            about = axis if self.trackball else self._axis(obj, number)
+            angles = heel.angles_after_turn(self.frames[number], self.starts[number], about, turn)
+            for prop, value in zip(_HEEL_PROPS, angles):
                 if abs(getattr(chain, prop) - value) > 1e-9:
                     setattr(chain, prop, value)
         self._status(context)
 
     def _status(self, context):
+        if self.trackball:
+            about, keys = "trackball", "E: axis   X / Y / Z: the axis"
+        else:
+            other = "Local" if self.start_space != "LOCAL" else "World"
+            about = f"about {self.space.title()} {'XYZ'[self.axis]} {math.degrees(self.angle):+.1f} deg"
+            keys = f"E: trackball   X / Y / Z: the axis (again: {other})"
         context.workspace.status_text_set(
-            f"Turn heel: {_HEEL_NAMES[self.axis]} {math.degrees(self.angle):+.1f} deg   "
-            "X: pitch  Y: roll  Z: yaw   Shift: precision   LMB / Enter: confirm   Esc / RMB: cancel"
+            f"Turn heel: {about}   {keys}   Shift: precision   LMB / Enter: confirm   Esc / RMB: cancel"
         )
+
+    def _set_trackball(self, context, on):
+        """Switch the trackball on or off, each time from the start. Blender hides the cursor
+        while it is on and draws its four arrows there instead."""
+        self.trackball = on
+        self.virtual = Vector((0.0, 0.0))
+        self.last_plane = None
+        if context.window:
+            if on:
+                context.window.cursor_modal_set("NONE")
+            else:
+                context.window.cursor_modal_restore()
+        if on and self._cursor is None:
+            self._cursor = bpy.types.SpaceView3D.draw_handler_add(self._draw_cursor, (), "WINDOW", "POST_PIXEL")
+        elif not on and self._cursor is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._cursor, "WINDOW")
+            self._cursor = None
+        if context.area:
+            context.area.tag_redraw()
+
+    def _draw_cursor(self):
+        draw_trackball_cursor(self.mouse)
+
+    def _draw_axis(self):
+        """The axis the heel is turned about, as a line through each pivot in the colour of that axis,
+        like the line a locked axis shows in the other modes."""
+        obj = self._object()
+        if not obj or self.trackball:
+            return
+        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+        region = bpy.context.region
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        shader.uniform_float("lineWidth", 2.0)
+        shader.uniform_float("color", _AXIS_COLORS[self.axis])
+        gpu.state.blend_set("ALPHA")
+        gpu.state.depth_test_set("NONE")
+        for number, origin in enumerate(self.centers):
+            direction = (self.world_rotation @ self._axis(obj, number)).normalized()
+            points = [origin - direction * _LINE_LENGTH, origin + direction * _LINE_LENGTH]
+            batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)
+        gpu.state.blend_set("NONE")
+
+    def _leave(self, context):
+        """The turn is over, confirmed or not: the cursor and its arrows go."""
+        if self.trackball:
+            self._set_trackball(context, False)
+        if getattr(self, "_axis_handle", None) is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._axis_handle, "WINDOW")
+            self._axis_handle = None
+        if context.area:
+            context.area.tag_redraw()
+        context.workspace.status_text_set(None)
 
     def modal(self, context, event):
         if event.type == "MOUSEMOVE":
             here = self._mouse(event) - self.center2d
             scale = 0.1 if event.shift else 1.0
-            if here.length > 2.0 and self.last.length > 2.0:
-                self.angle += screen_angle(self.last, here) * scale
+            self.mouse = self._mouse(event)
+            if self.trackball:
+                # What the mouse moved this time (the window's own steps, which stay right when the
+                # cursor wraps at the edge), added up; Shift slows it to a thirtieth, like Blender.
+                step = Vector((event.mouse_x - event.mouse_prev_x, event.mouse_y - event.mouse_prev_y))
+                self.virtual += step * (1.0 / 30.0 if event.shift else 1.0)
+                self.last = here
+                self._apply(context)
+                context.area.tag_redraw()
+                return {"RUNNING_MODAL"}
+            plane = self._plane_point(context, event)
+            before = self.last_plane
+            if before is not None and plane is not None and before.length > 1e-6 and plane.length > 1e-6:
+                axis = self.world_rotation @ self._axis(self._object(), 0)
+                # Right-handed about the axis: a foot turned by this follows the mouse round it.
+                self.angle += math.atan2(axis.dot(before.cross(plane)), before.dot(plane)) * scale
+            self.last_plane = plane
             self.sideways += (here.x - self.last.x) * scale
             self.last = here
             self._apply(context)
-        elif event.type in {"X", "Y", "Z"} and event.value == "PRESS":
-            self.axis = "XYZ".index(event.type)
+        elif event.type == "E" and event.value == "PRESS" and not event.is_repeat:
+            # Back and forth between turning about an axis and the trackball, each from the start.
+            self._set_trackball(context, not self.trackball)
+            self.angle = 0.0
             self._apply(context)
+        elif event.type in {"X", "Y", "Z"} and event.value == "PRESS":
+            if self.trackball:
+                self._set_trackball(context, False)  # an axis: back to turning about it
+                self.angle = 0.0
+            axis = "XYZ".index(event.type)
+            if self.pressed and self.axis == axis:
+                # The same key again, as when locking a move to an axis: the space it is in swaps.
+                other = "LOCAL" if self.start_space != "LOCAL" else "WORLD"
+                self.space = other if self.space == self.start_space else self.start_space
+            else:
+                self.axis, self.space, self.pressed = axis, self.start_space, True
+            self.last_plane = None  # measured again, about the new axis, from the next move
+            self._apply(context)
+            context.area.tag_redraw()
         elif event.type in {"LEFTMOUSE", "RET", "NUMPAD_ENTER"} and event.value == "PRESS":
-            context.workspace.status_text_set(None)
+            self._leave(context)
             return {"FINISHED"}
         elif event.type in {"RIGHTMOUSE", "ESC"} and event.value == "PRESS":
             obj = self._object()
             if obj:
                 restore(obj, self.saved)
-            context.workspace.status_text_set(None)
+            self._leave(context)
             return {"CANCELLED"}
         elif event.type in {"MIDDLEMOUSE", "WHEELUPMOUSE", "WHEELDOWNMOUSE", "TRACKPADPAN", "TRACKPADZOOM"}:
             return {"PASS_THROUGH"}  # the view can still be moved around
@@ -463,7 +634,7 @@ class LIVEIK_OT_heel_rotate(bpy.types.Operator):
         obj = self._object()
         if obj:
             restore(obj, self.saved)
-        context.workspace.status_text_set(None)
+        self._leave(context)
 
 
 class LIVEIK_OT_reset_end(bpy.types.Operator):
@@ -532,6 +703,7 @@ def register():
             (LIVEIK_OT_heel_rotate, "E", {}),
             (LIVEIK_OT_reset_end, "G", {"alt": True}),
             (LIVEIK_OT_reset_heel_key, "E", {"ctrl": True, "alt": True}),
+            (LIVEIK_OT_reset_heel_key, "E", {"ctrl": True, "shift": True}),
         ):
             _KEYMAPS.append((keymap, keymap.keymap_items.new(operator.bl_idname, key, "PRESS", **modifiers)))
 

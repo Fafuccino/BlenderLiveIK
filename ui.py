@@ -407,13 +407,13 @@ class LIVEIK_PT_main(bpy.types.Panel):
 _KEYBINDS = (
     ("G", "Move the IK target of a foot or hand, or the pole (the pinned joint, if there is one) when the thigh or calf (arm or forearm) is selected"),
     ("Alt+G", "Put the IK target back at its rest location, or the pole at its default (the pinned joint at its rest location)"),
-    ("E", "Turn the heel of a foot about its pivot"),
-    ("Ctrl+Alt+E", "Reset the heel"),
+    ("E", "Turn the heel of a foot about its pivot. E again: trackball"),
+    ("Ctrl+Alt+E / Ctrl+Shift+E", "Reset the heel"),
     ("G / R / S", "With a Parent Chain on and one of its bones selected: move, rotate or scale it with the bones after it"),
     ("G / R / S", "With a joint pinned, on the bones it hangs from (chest, shoulder...): they swing about the pinned joint"),
 )
 _KEYBIND_MODAL = (
-    ("X / Y / Z", "Constrain to an axis (again: local). Shift+X / Y / Z: to the plane. While turning the heel: pitch / roll / yaw"),
+    ("X / Y / Z", "Constrain to an axis (again: local). Shift+X / Y / Z: to the plane. While turning the heel: the axis to turn about, in the panel's orientation (again: Local, or World when that is Local)"),
     ("Shift", "Precision"),
     ("LMB / Enter", "Confirm"),
     ("Esc / RMB", "Cancel"),
