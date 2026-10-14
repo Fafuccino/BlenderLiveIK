@@ -70,9 +70,13 @@ def grabbed(context):
     When the opposite chain of a pair is in the list too, only one of the two is moved: pose
     symmetry moves the other.
     """
+    from . import parent_chain
+
     obj = context.object
     if not obj or obj.type != "ARMATURE" or context.mode != "POSE" or not heel.solving_enabled():
         return None
+    if parent_chain.driven(context):
+        return None  # the active Parent Chain has these bones
     selected = context.selected_pose_bones
     if not selected:
         return None

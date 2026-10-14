@@ -50,6 +50,11 @@ def reconcile(armature):
                         if value in renames:
                             setattr(chain, prop, renames[value])
                             updated += 1
+                for parent_chain in obj.live_ik.parent_chains:
+                    for item in parent_chain.bones:
+                        if item.bone in renames:
+                            item.bone = renames[item.bone]
+                            updated += 1
     finally:
         properties.quiet = False
     return updated

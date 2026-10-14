@@ -18,10 +18,11 @@ if "bpy" in locals():
     importlib.reload(state)
     importlib.reload(names)
     importlib.reload(grab)
+    importlib.reload(parent_chain)
     importlib.reload(ui)
     importlib.reload(gizmos)
 else:
-    from . import gizmos, grab, handlers, heel, keying, names, properties, state, ui
+    from . import gizmos, grab, handlers, heel, keying, names, parent_chain, properties, state, ui
 
 import bpy
 
@@ -34,9 +35,11 @@ def register():
     state.register()
     names.register()
     grab.register()
+    parent_chain.register()
 
 
 def unregister():
+    parent_chain.unregister()
     grab.unregister()
     names.unregister()
     state.unregister()

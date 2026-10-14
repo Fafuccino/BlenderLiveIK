@@ -95,6 +95,8 @@ def _anchor_name(obj, chain, prop):
     b0, _, b2, _ = _bones(obj, chain)
     if prop == "heel_pos":
         return b2.name if b2 else None
+    if chain.pole_pinned:
+        return None  # pinned: the pole stays where it is while the bones above the chain move
     if valid_ik_parent(obj, chain):
         return valid_ik_parent(obj, chain)
     return b0.parent.name if b0 and b0.parent else None
@@ -106,11 +108,15 @@ def bone_pose_matrix(obj, name):
     return _unscaled(pose_bone.matrix) if pose_bone else Matrix.Identity(4)
 
 
-def reparent_pole(obj, chain):
-    """The pole's anchor changed: keep the pole where it is, relative to the new anchor."""
+def reparent_pole(obj, chain, old_name=None):
+    """The pole's anchor changed: keep the pole where it is, relative to the new anchor.
+
+    old_name is the bone the pole was measured from, when the record cannot say (pinning)."""
     b0 = _bones(obj, chain)[0]
-    # Files from before the IK parent existed have no record: the anchor was the thigh's parent.
-    old_name = chain.pole_anchor or (b0.parent.name if b0 and b0.parent else "")
+    if old_name is None:
+        # Files from before the IK parent existed have no record: the anchor was the thigh's parent.
+        legacy = "" if chain.pole_pinned else (b0.parent.name if b0 and b0.parent else "")
+        old_name = chain.pole_anchor or legacy
     new_name = _anchor_name(obj, chain, "pole_pos") or ""
     world = bone_pose_matrix(obj, old_name) @ Vector(chain.pole_pos)
     chain.pole_anchor = new_name
@@ -254,6 +260,28 @@ def _on_ik_parent_changed(self, context):
             heel.sync_ik(obj, self)
 
 
+def _on_pole_pin_changed(self, context):
+    from . import heel
+
+    if quiet:
+        return
+    obj = _armature(self)
+    if not obj:
+        return
+    if self.pole_pinned:
+        # It was following its anchor; it stays where it is now.
+        b0 = _bones(obj, self)[0]
+        old_name = self.pole_anchor or (b0.parent.name if b0 and b0.parent else "")
+    else:
+        old_name = ""  # it was fixed in armature space
+    with heel.no_mirroring():
+        reparent_pole(obj, self, old_name)
+    partner = heel.symmetry_partner(obj, self)
+    if partner and partner.pole_pinned != self.pole_pinned:
+        partner.pole_pinned = self.pole_pinned
+    _redraw(self, context)
+
+
 def _on_ik_toggled(self, context):
     from . import heel
 
@@ -367,6 +395,13 @@ class LiveIKChain(bpy.types.PropertyGroup):
     end_root_left: FloatVectorProperty(name="Root Left", size=16, default=IDENTITY_MATRIX)
     # The bone the pole was last measured from, to move it when that changes.
     pole_anchor: StringProperty(name="Pole Anchor")
+    pole_pinned: BoolProperty(
+        name="Pin Pole",
+        description="Keep the pole (so the knee or elbow) where it is while the bones above the chain move, "
+        "instead of carrying it along with them",
+        default=False,
+        update=_on_pole_pin_changed,
+    )
     ik_parent: StringProperty(
         name="IK Parent",
         description="Optional bone the IK foot and its pole are parented to: they follow it when it moves",
@@ -394,6 +429,31 @@ class LiveIKChain(bpy.types.PropertyGroup):
     )
 
 
+class LiveIKParentBone(bpy.types.PropertyGroup):
+    bone: StringProperty(name="Bone")
+
+
+def _on_parent_chain_toggled(self, context):
+    """Only one Parent Chain is active at a time: switching one on switches the others off."""
+    obj = self.id_data
+    if self.active and isinstance(obj, bpy.types.Object):
+        for other in obj.live_ik.parent_chains:
+            if other != self and other.active:
+                other.active = False  # its own update finds it off and stops
+    _redraw(self, context)
+
+
+class LiveIKParentChain(bpy.types.PropertyGroup):
+    bones: CollectionProperty(type=LiveIKParentBone)
+    active: BoolProperty(
+        name="Active",
+        description="Transform this list of bones as if each were the child of the one before it: G, R and S "
+        "on one of them also move the ones after it, and the parent of the last one. Only one is active at a time",
+        default=False,
+        update=_on_parent_chain_toggled,
+    )
+
+
 def _on_count_changed(self, context):
     chains = self.chains
     while len(chains) < self.chain_count:
@@ -407,9 +467,10 @@ def _on_count_changed(self, context):
 class LiveIKSettings(bpy.types.PropertyGroup):
     chain_count: IntProperty(name="Chains", min=0, max=MAX_CHAINS, default=0, update=_on_count_changed)
     chains: CollectionProperty(type=LiveIKChain)
+    parent_chains: CollectionProperty(type=LiveIKParentChain)
 
 
-classes = (LiveIKChain, LiveIKSettings)
+classes = (LiveIKChain, LiveIKParentBone, LiveIKParentChain, LiveIKSettings)
 
 
 def register():

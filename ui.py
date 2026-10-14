@@ -2,7 +2,7 @@ import bpy
 
 from mathutils import Vector
 
-from . import heel, keying
+from . import heel, keying, parent_chain
 from .properties import (
     BONE_SLOTS,
     MAX_CHAINS,
@@ -187,6 +187,7 @@ class LIVEIK_OT_symmetrize(bpy.types.Operator):
         target.bone_0, target.bone_1, target.bone_2, target.bone_3 = mirrored
         target.symmetric = source.symmetric
         target.pole_angle = -source.pole_angle
+        target.pole_pinned = source.pole_pinned
         target.ik_parent = ""
         if source.ik_parent:
             # A parent without a counterpart (root, hips...) is shared by both sides.
@@ -200,6 +201,93 @@ class LIVEIK_OT_symmetrize(bpy.types.Operator):
             point = rest_anchor(obj, source, prop) @ Vector(getattr(source, prop))
             setattr(target, prop, rest_anchor(obj, target, prop).inverted() @ _mirror_x(point))
         return {"FINISHED"}
+
+
+class _ParentChainOperator(bpy.types.Operator):
+    bl_options = {"UNDO", "INTERNAL"}
+
+    index: bpy.props.IntProperty(options={"SKIP_SAVE"})
+    slot: bpy.props.IntProperty(options={"SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context):
+        return context.object and context.object.type == "ARMATURE"
+
+
+class LIVEIK_OT_add_parent_chain(_ParentChainOperator):
+    bl_idname = "live_ik.add_parent_chain"
+    bl_label = "Add Parent Chain"
+    bl_description = "Add a list of bones that transform as if each were the child of the one before it"
+
+    def execute(self, context):
+        settings = context.object.live_ik
+        if len(settings.parent_chains) >= MAX_CHAINS:
+            self.report({"WARNING"}, "No room for another Parent Chain")
+            return {"CANCELLED"}
+        settings.parent_chains.add()
+        return {"FINISHED"}
+
+
+class LIVEIK_OT_remove_parent_chain(_ParentChainOperator):
+    bl_idname = "live_ik.remove_parent_chain"
+    bl_label = "Remove Parent Chain"
+    bl_description = "Remove this Parent Chain"
+
+    def execute(self, context):
+        chains = context.object.live_ik.parent_chains
+        if not 0 <= self.index < len(chains):
+            return {"CANCELLED"}
+        chains.remove(self.index)
+        return {"FINISHED"}
+
+
+class LIVEIK_OT_add_parent_bone(_ParentChainOperator):
+    bl_idname = "live_ik.add_parent_bone"
+    bl_label = "Add Bone"
+    bl_description = "Add a bone to the end of the list: it must be the parent of the one before it"
+
+    def execute(self, context):
+        chains = context.object.live_ik.parent_chains
+        if not 0 <= self.index < len(chains):
+            return {"CANCELLED"}
+        chains[self.index].bones.add()
+        return {"FINISHED"}
+
+
+class LIVEIK_OT_remove_parent_bone(_ParentChainOperator):
+    bl_idname = "live_ik.remove_parent_bone"
+    bl_label = "Remove Bone"
+    bl_description = "Take this bone out of the list"
+
+    def execute(self, context):
+        chains = context.object.live_ik.parent_chains
+        if not 0 <= self.index < len(chains) or not 0 <= self.slot < len(chains[self.index].bones):
+            return {"CANCELLED"}
+        chains[self.index].bones.remove(self.slot)
+        return {"FINISHED"}
+
+
+def _draw_parent_chains(layout, obj):
+    settings = obj.live_ik
+    header = layout.row()
+    header.label(text="Parent Chains")
+    header.operator("live_ik.add_parent_chain", text="", icon="ADD")
+    for i, chain in enumerate(settings.parent_chains):
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text=f"Parent Chain {i + 1}")
+        row.prop(chain, "active", text="On" if chain.active else "Off", toggle=True)
+        row.operator("live_ik.remove_parent_chain", text="", icon="X", emboss=False).index = i
+        broken = parent_chain.broken_at(obj, chain)
+        for slot, item in enumerate(chain.bones):
+            row = box.row(align=True)
+            row.alert = broken is not None and slot >= broken
+            row.prop_search(item, "bone", obj.pose, "bones", text="Moves" if slot == 0 else "Parent")
+            op = row.operator("live_ik.remove_parent_bone", text="", icon="X")
+            op.index, op.slot = i, slot
+        if broken is not None:
+            box.label(text="Each bone must be the parent of the one before", icon="ERROR")
+        box.operator("live_ik.add_parent_bone", text="Add Bone", icon="ADD").index = i
 
 
 class LIVEIK_PT_main(bpy.types.Panel):
@@ -268,6 +356,7 @@ class LIVEIK_PT_main(bpy.types.Panel):
             pole_box = box.box()
             row = pole_box.row()
             row.label(text="Pole")
+            row.prop(chain, "pole_pinned", text="", icon="PINNED" if chain.pole_pinned else "UNPINNED", toggle=True)
             row.operator("live_ik.reset_pole", text="", icon="LOOP_BACK").index = i
             col = pole_box.column(align=True)
             col.prop(chain, "pole_offset", text="Position")
@@ -291,6 +380,9 @@ class LIVEIK_PT_main(bpy.types.Panel):
                 col.prop(chain, "heel_roll")
                 col.prop(chain, "heel_yaw")
 
+        layout.separator()
+        _draw_parent_chains(layout, obj)
+
 
 # The keys the add-on adds in Pose Mode, as (key, what it does). Shown in the Keybinds panel.
 _KEYBINDS = (
@@ -298,6 +390,7 @@ _KEYBINDS = (
     ("Alt+G", "Put the IK target back at its rest position, or the pole at its default"),
     ("E", "Turn the heel of a foot about its pivot"),
     ("Ctrl+Alt+E", "Reset the heel"),
+    ("G / R / S", "With a Parent Chain on and one of its bones selected: move, rotate or scale it with the bones after it"),
 )
 _KEYBIND_MODAL = (
     ("X / Y / Z", "Constrain to an axis (again: local). Shift+X / Y / Z: to the plane. While turning the heel: pitch / roll / yaw"),
@@ -357,6 +450,10 @@ classes = (
     LIVEIK_OT_toggle_chain,
     LIVEIK_OT_key_chain,
     LIVEIK_OT_symmetrize,
+    LIVEIK_OT_add_parent_chain,
+    LIVEIK_OT_remove_parent_chain,
+    LIVEIK_OT_add_parent_bone,
+    LIVEIK_OT_remove_parent_bone,
     LIVEIK_PT_main,
     LIVEIK_PT_keys,
 )
