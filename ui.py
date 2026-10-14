@@ -8,6 +8,7 @@ from .properties import (
     MAX_CHAINS,
     OPTIONAL_SLOTS,
     compute_defaults,
+    default_pole,
     mirror_partner,
     mirrored_bones,
     rest_anchor,
@@ -57,6 +58,27 @@ class LIVEIK_OT_reset_heel(bpy.types.Operator):
             return {"CANCELLED"}
         chain = chains[self.index]
         chain.heel_pitch = chain.heel_roll = chain.heel_yaw = 0.0
+        return {"FINISHED"}
+
+
+class LIVEIK_OT_reset_pole(bpy.types.Operator):
+    bl_idname = "live_ik.reset_pole"
+    bl_label = "Reset Pole"
+    bl_description = "Put the pole (its position and angle) back at its default"
+    bl_options = {"UNDO", "INTERNAL"}
+
+    index: bpy.props.IntProperty(options={"SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context):
+        return context.object and context.object.type == "ARMATURE"
+
+    def execute(self, context):
+        obj = context.object
+        chains = obj.live_ik.chains
+        if not 0 <= self.index < len(chains):
+            return {"CANCELLED"}
+        default_pole(obj, chains[self.index])
         return {"FINISHED"}
 
 
@@ -243,22 +265,28 @@ class LIVEIK_PT_main(bpy.types.Panel):
 
             box.prop_search(chain, "ik_parent", obj.data, "bones", text="IK Parent (optional)")
 
-            col = box.column(align=True)
-            col.prop(chain, "pole_offset", text="Pole")
+            pole_box = box.box()
+            row = pole_box.row()
+            row.label(text="Pole")
+            row.operator("live_ik.reset_pole", text="", icon="LOOP_BACK").index = i
+            col = pole_box.column(align=True)
+            col.prop(chain, "pole_offset", text="Position")
             col.prop(chain, "pole_angle")
 
             if chain.chain_type == "LEG":
-                row = col.row(align=True)
-                field = row.row(align=True)
-                field.enabled = not chain.heel_locked
-                field.prop(chain, "heel_offset", text="Pivot")
-                row.prop(chain, "heel_locked", text="", icon="LOCKED" if chain.heel_locked else "UNLOCKED")
+                heel_box = box.box()
+                heel_box.label(text="Heel")
+                row = heel_box.row()
+                row.label(text="Pivot")
+                row.prop(chain, "heel_locked", text="", icon="LOCKED" if chain.heel_locked else "UNLOCKED", emboss=False)
+                col = heel_box.column(align=True)
+                col.enabled = not chain.heel_locked
+                col.prop(chain, "heel_offset", text="Position")
 
-                col = box.column(align=True)
-                row = col.row()
-                row.label(text="Heel")
-                op = row.operator("live_ik.reset_heel", text="", icon="LOOP_BACK")
-                op.index = i
+                row = heel_box.row()
+                row.label(text="Rotation")
+                row.operator("live_ik.reset_heel", text="", icon="LOOP_BACK").index = i
+                col = heel_box.column(align=True)
                 col.prop(chain, "heel_pitch")
                 col.prop(chain, "heel_roll")
                 col.prop(chain, "heel_yaw")
@@ -325,6 +353,7 @@ class LIVEIK_PT_keys(bpy.types.Panel):
 classes = (
     LIVEIK_OT_reset_gizmos,
     LIVEIK_OT_reset_heel,
+    LIVEIK_OT_reset_pole,
     LIVEIK_OT_toggle_chain,
     LIVEIK_OT_key_chain,
     LIVEIK_OT_symmetrize,
