@@ -23,6 +23,8 @@ to its rest position, the pole to its default. Ctrl+Alt+E resets the heel.
 import math
 
 import bpy
+import gpu
+from gpu_extras.batch import batch_for_shader
 from bpy_extras import view3d_utils
 from mathutils import Matrix, Vector
 
@@ -132,6 +134,10 @@ def restore(obj, saved):
             heel.suspended = False
 
 
+_AXIS_COLORS = ((0.9, 0.25, 0.3, 1.0), (0.5, 0.8, 0.2, 1.0), (0.3, 0.5, 0.95, 1.0))  # X, Y, Z
+_LINE_LENGTH = 1000.0
+
+
 def constrain(delta, axis, plane, direction):
     """A movement kept to an axis, or to the plane perpendicular to it."""
     if axis is None:
@@ -188,6 +194,38 @@ class LIVEIK_OT_grab(bpy.types.Operator):
                 chain.pole_pos = anchor.inverted() @ (point + delta)
         self._status(context)
 
+    def _draw_axes(self):
+        """The line (or the two lines of the plane) the move is kept to, through where it started,
+        like Blender's own constraint axes."""
+        obj = self._object()
+        if not obj or self.axis is None:
+            return
+        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+        region = bpy.context.region
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        shader.uniform_float("lineWidth", 2.0)
+        axes = [a for a in range(3) if a != self.axis] if self.plane else [self.axis]
+        gpu.state.blend_set("ALPHA")
+        gpu.state.depth_test_set("NONE")
+        world = obj.matrix_world
+        for number in range(len(self.indices)):
+            if self.kinds[number] == END:
+                origin = world @ self.starts[number].translation
+                frame = self.starts[number].to_3x3()
+            else:
+                origin = world @ self.starts[number][1]
+                frame = self.starts[number][0].to_3x3()
+            for axis in axes:
+                if self.local:
+                    direction = (world.to_quaternion().to_matrix() @ frame.col[axis]).normalized()
+                else:
+                    direction = Vector(tuple(1.0 if i == axis else 0.0 for i in range(3)))
+                points = [origin - direction * _LINE_LENGTH, origin + direction * _LINE_LENGTH]
+                shader.uniform_float("color", _AXIS_COLORS[axis])
+                batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)
+        gpu.state.depth_test_set("NONE")
+        gpu.state.blend_set("NONE")
+
     def _status(self, context):
         if self.axis is None:
             where = ""
@@ -230,11 +268,17 @@ class LIVEIK_OT_grab(bpy.types.Operator):
         self.plane = False
         self.local = False
         self.last = self._mouse_location(context, event)
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(self._draw_axes, (), "WINDOW", "POST_VIEW")
         context.window_manager.modal_handler_add(self)
         self._status(context)
         return {"RUNNING_MODAL"}
 
     def _finish(self, context):
+        if getattr(self, "_handle", None) is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle, "WINDOW")
+            self._handle = None
+        if context.area:
+            context.area.tag_redraw()
         context.workspace.status_text_set(None)
         if editing_poles:
             editing_poles.clear()
@@ -257,6 +301,7 @@ class LIVEIK_OT_grab(bpy.types.Operator):
             else:
                 self.axis, self.plane, self.local = axis, event.shift, False
             self._apply(context)
+            context.area.tag_redraw()
         elif event.type in {"LEFTMOUSE", "RET", "NUMPAD_ENTER"} and event.value == "PRESS":
             self._finish(context)
             return {"FINISHED"}
