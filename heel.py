@@ -52,6 +52,8 @@ def clear(chain):
         chain.heel_pitch = chain.heel_roll = chain.heel_yaw = 0.0
         chain.heel_done = (0.0, 0.0, 0.0)
         chain.heel_neutral = chain.heel_neutral_toes = chain.heel_last = chain.heel_last_toes = IDENTITY_MATRIX
+        chain.heel_toes_edited = False
+        chain.heel_plane = IDENTITY_QUATERNION
         chain.end_goal = chain.end_left = chain.end_basis_left = IDENTITY_MATRIX
         chain.end_thigh_left = chain.end_calf_left = chain.end_root_left = IDENTITY_MATRIX
         chain.end_parent_left = IDENTITY_MATRIX
@@ -232,7 +234,7 @@ def sync_ik(obj, chain, user_edit=True):
             keying.request(obj, chain)
 
 
-def _forward_frame(foot_matrix, foot, toes):
+def _forward_frame(foot_matrix, foot, toes, rotation=None):
     """Ground frame of a foot, with forward pointing toward the toes.
 
     Forward has to answer two things at once. It must point toward the toes, whichever way
@@ -252,17 +254,15 @@ def _forward_frame(foot_matrix, foot, toes):
         directions.append(toes.tail - toes.head)
         directions.append((foot_matrix @ _rest_rel(toes.bone)).translation - foot_matrix.translation)
     directions.append(foot_matrix.col[1].to_3d())
+    if rotation is not None:
+        directions = [rotation @ direction for direction in directions]
     return ground_frame(directions)
 
 
 def _pivot_ground_frame(obj, chain):
-    """The foot's ground frame, taken from the foot target.
-
-    Unlike heel_frame's, this one does not ignore the heel rotation: it is fixed while the
-    pivot is being edited.
-    """
-    _, _, foot, toes = _pose_bones(obj, chain)
-    return _forward_frame(end_target(obj, chain), foot, toes)
+    """The foot's ground frame (see heel_frame), for the handles of the pivot."""
+    state = heel_frame(obj, chain)
+    return state[1] if state else Matrix.Identity(3)
 
 
 def handle_axes(obj, chain, kind):
@@ -318,18 +318,66 @@ def set_pole_offset(obj, chain, offset):
     chain.pole_pos = anchor.inverted() @ (anchor.translation + handle_axes(obj, chain, "pole_pos") @ offset)
 
 
+IDENTITY_MATRIX_4 = Matrix.Identity(4)
+
+
+def at_rest(obj, chain, toes, target):
+    """True when the foot is turned as in the rest pose and the toes are not turned: whatever
+    the heel did before, that is a reset (Alt+R, Alt+G...), and the heel starts from flat."""
+    bone = obj.data.bones.get(chain.bone_2)
+    if not bone or not toes or not _close(toes.matrix_basis, IDENTITY_MATRIX_4):
+        return False
+    rest = _unscaled(bone.matrix_local)
+    name = valid_ik_parent(obj, chain)
+    if name:
+        rest = ik_parent_matrix(obj, chain) @ _unscaled(obj.data.bones[name].matrix_local).inverted() @ rest
+    return _close(target.to_3x3(), rest.to_3x3())
+
+
+def forget_heel(chain):
+    """Back to flat: the angles, the sole plane and what was remembered for the way back."""
+    global suspended
+    suspended = True
+    try:
+        chain.heel_pitch = chain.heel_roll = chain.heel_yaw = 0.0
+        chain.heel_done = (0.0, 0.0, 0.0)
+        chain.heel_neutral = chain.heel_neutral_toes = chain.heel_last = chain.heel_last_toes = IDENTITY_MATRIX
+        chain.heel_toes_edited = False
+        chain.heel_plane = IDENTITY_QUATERNION
+    finally:
+        suspended = False
+
+
 def heel_frame(obj, chain):
     """(pivot, frame, target) in armature space, or None.
 
     The pivot is a point of the foot, so it is where the foot target puts it. The frame is
     the foot's ground frame as it is now (forward toward the toes, up perpendicular to the
-    armature's ground plane): the pitch / roll / yaw axes follow the foot's direction.
+    ground): the pitch / roll / yaw axes follow the foot's direction. The ground here is the
+    foot's sole plane, which is the ground itself until the toes were turned by something else
+    than the heel (see recalibrate_heel): the frame is tilted with it.
     """
     _, _, foot, toes = _pose_bones(obj, chain)
     if not foot:
         return None
     target = end_target(obj, chain)
-    return target @ Vector(chain.heel_pos), _forward_frame(target, foot, toes), target
+    has_toes = bool(toes) and toes.parent == foot
+    plane = Quaternion(chain.heel_plane)
+    if (
+        has_toes
+        and plane.angle > 1e-6
+        and (
+            at_rest(obj, chain, toes, target)
+            or (
+                not is_rotated(chain)
+                and not (_close(target, _mat(chain.heel_last)) and _close(toes.matrix_basis, _mat(chain.heel_last_toes)))
+            )
+        )
+    ):
+        plane = Quaternion()  # the pose was reset (Alt+R, Alt+G...): the sole plane is the ground again
+    plane = plane.to_matrix() if has_toes else Matrix.Identity(3)
+    frame = plane @ _forward_frame(target, foot, toes, plane.inverted())
+    return target @ Vector(chain.heel_pos), frame, target
 
 
 def _heel_rotation(frame, angles):
@@ -386,7 +434,14 @@ def apply_heel(obj, chain):
     also moves the foot so the toes stay where they are, height and place: that turn carries
     them along an arc, down when the pivot is behind them, forward as well, up when it is
     beyond them, and the toes are what stands on the ground. Raising the toes does not.
+
+    All of that is done against the foot's sole plane. Normally that is the ground. When the
+    toes were turned by something else than the heel it is the ground turned with them, about
+    the toes' head: the heel is then worked out in a "virtual world" where that plane is the
+    ground, and the result is carried back. The toes' head is what the plane is turned about, so
+    it stays where it is, and nothing else needs to know about the plane.
     """
+    global suspended
     if suspended or chain.chain_type != "LEG" or not solving_enabled():
         return
     old = tuple(chain.heel_done)
@@ -394,49 +449,180 @@ def apply_heel(obj, chain):
     if max(abs(a - b) for a, b in zip(old, new)) < 1e-7:
         return
     bpy.context.view_layer.update()  # make the pose bone matrices current
-    state = heel_frame(obj, chain)
-    if not state:
+    if not heel_frame(obj, chain):
         return
-    pivot, frame, target = state
     _, _, foot, toes = _pose_bones(obj, chain)
+    has_toes = bool(toes) and toes.parent == foot
 
-    # The frame follows the foot's direction, so it already includes the yaw the heel gave the
-    # foot. The angles are measured in the frame the foot had before that yaw, or the yaw would
-    # be counted twice and putting the sliders back in another order would not retrace the way.
-    frame = frame @ Matrix.Rotation(-old[2], 3, "Z")
-    turn = _heel_rotation(frame, new) @ _heel_rotation(frame, old).inverted()
-    follow = _toes_follow(frame, old, new)
-    # The toes are meant to go only where `follow` takes them. The rest of the turn (the
-    # raised-heel part of the pitch) would carry them elsewhere: the foot is moved back by
-    # the difference.
-    stand = _toes_stand(foot, toes, target)
-    shift = _about(pivot, follow.to_quaternion()) @ stand - _about(pivot, turn.to_quaternion()) @ stand
+    # The toes may have been turned by something else than the heel since it last moved them:
+    # the sole plane and the pitch are then measured again (see recalibrate_heel). The change
+    # that was asked for stays the same: it is just measured from where the heel really is.
+    if recalibrate_heel(obj, chain):
+        asked = new[0] - old[0]
+        old = tuple(chain.heel_done)
+        new = (old[0] + asked, new[1], new[2])
+        suspended = True
+        try:
+            chain.heel_pitch = new[0]
+        finally:
+            suspended = False
 
-    goal = Matrix.Translation(shift) @ _about(pivot, turn.to_quaternion()) @ target
+    was_zero = max(abs(a) for a in old) < 1e-5
+    if was_zero and Quaternion(chain.heel_plane).angle > 1e-6:
+        # The heel is back at 0 and starts again. The sole plane it left is still the one
+        # the foot lies on, if nothing touched the foot or the toes in between.
+        target = end_target(obj, chain)
+        untouched = (
+            has_toes
+            and not _close(toes.matrix_basis, IDENTITY_MATRIX_4)
+            and _close(target, _mat(chain.heel_last))
+            and _close(toes.matrix_basis, _mat(chain.heel_last_toes))
+        )
+        if not untouched:
+            chain.heel_plane = IDENTITY_QUATERNION
+    pivot, frame, target = heel_frame(obj, chain)
+
+    # The virtual world: the real one turned about the toes' head until the sole plane is
+    # the ground. Without a turned sole plane it is the real world.
+    plane = Quaternion(chain.heel_plane) if has_toes else Quaternion()
+    rotation = plane.to_matrix()
+    carry = Matrix.Identity(4)
+    if has_toes and plane.angle > 1e-9:
+        carry = _about((target @ _rest_rel(toes.bone)).translation, plane)
+    carry_back = carry.inverted()
+    target_v = carry_back @ target
+    frame_v = rotation.inverted() @ frame
 
     # Turning the heel and turning it back are not exact opposites: the toes are planted where
     # they are at the time, and rolling or swiveling carries them along an arc in between. So
     # the way out of the heel is remembered, and sliders back at 0 take it, as long as nothing
     # moved the foot since the heel last did.
-    was_zero = max(abs(a) for a in old) < 1e-7
     if was_zero:
-        chain.heel_neutral = _flat(target)
+        chain.heel_neutral = _flat(target_v)
         chain.heel_neutral_toes = _flat(toes.matrix_basis) if toes else IDENTITY_MATRIX
-    back_to_neutral = max(abs(a) for a in new) < 1e-7 and not was_zero and _close(target, _mat(chain.heel_last))
+        chain.heel_toes_edited = False
+
+    # The frame follows the foot's direction, so it already includes the yaw the heel gave the
+    # foot. The angles are measured in the frame the foot had before that yaw, or the yaw would
+    # be counted twice and putting the sliders back in another order would not retrace the way.
+    frame_v = frame_v @ Matrix.Rotation(-old[2], 3, "Z")
+    turn = _heel_rotation(frame_v, new) @ _heel_rotation(frame_v, old).inverted()
+    follow = _toes_follow(frame_v, old, new)
+    # A heel that goes from raised to toes up (or back) in one step turns the foot about two
+    # different points, the toes' head and then the heel pivot: it is done as two steps, the
+    # second from where the first left the foot.
+    steps = [(old, new)]
+    if old[0] * new[0] < 0.0:
+        middle = (0.0, old[1], old[2])
+        steps = [(old, middle), (middle, new)]
+    goal_v = target_v
+    for before, after in steps:
+        pivot_here = goal_v @ Vector(chain.heel_pos)
+        step_turn = _heel_rotation(frame_v, after) @ _heel_rotation(frame_v, before).inverted()
+        step_follow = _toes_follow(frame_v, before, after)
+        # The toes are meant to go only where `follow` takes them. The rest of the turn (the
+        # raised-heel part of the pitch) would carry them elsewhere: the foot is moved back by
+        # the difference.
+        stand = _toes_stand(foot, toes, goal_v)
+        shift = (
+            _about(pivot_here, step_follow.to_quaternion()) @ stand
+            - _about(pivot_here, step_turn.to_quaternion()) @ stand
+        )
+        goal_v = Matrix.Translation(shift) @ _about(pivot_here, step_turn.to_quaternion()) @ goal_v
+
+    back_to_neutral = (
+        max(abs(a) for a in new) < 1e-7
+        and not was_zero
+        and not chain.heel_toes_edited  # the foot was moved by something else: not the first pose
+        and _close(target, _mat(chain.heel_last))
+    )
     if back_to_neutral:
-        goal = _mat(chain.heel_neutral)
+        goal_v = _mat(chain.heel_neutral)
+    goal = carry @ goal_v
 
     foot_matrix = solve_limb(obj, chain, goal)
     if foot_matrix:
         chain.heel_done = new
-        toes_untouched = bool(toes) and toes.parent == foot and _close(toes.matrix_basis, _mat(chain.heel_last_toes))
-        if back_to_neutral and toes_untouched:
+        if back_to_neutral and has_toes:
             toes.matrix_basis = _mat(chain.heel_neutral_toes)
         else:
-            _counter_toes(obj, chain, foot_matrix, follow, turn)
+            # What the toes turn back by was worked out in the virtual world: it is the same
+            # turn, about the same point, seen from the real one.
+            _counter_toes(
+                obj, chain, foot_matrix, rotation @ follow @ rotation.inverted(), rotation @ turn @ rotation.inverted()
+            )
         chain.heel_last = _flat(goal)
         chain.heel_last_toes = _flat(toes.matrix_basis) if toes else IDENTITY_MATRIX
         keying.request(obj, chain)
+
+
+def _twist(rotation, axis):
+    """How far a rotation turns about an axis (radians)."""
+    about, angle = rotation.to_axis_angle()
+    return angle * about.dot(axis)
+
+
+def recalibrate_heel(obj, chain):
+    """The toes or the foot were turned by something else than the heel while it is turned: the
+    foot's sole plane, and the pitch, are worked out again.
+
+    The sole plane is the plane the foot lies on, the ground to begin with. Its triangle is the
+    heel at rest, the toes' head, and the foot of the perpendicular from the toes' head to the
+    plane (the right angle): turning the plane about the toes' head keeps its legs and its
+    right angle, so the triangle only changes its angle.
+
+    - The toes were turned (by hand, by a parent, by an animation): the plane is turned about
+      the toes' head by the same turn, and the foot, which did not move, is now at a different
+      angle to it: the pitch changes by the opposite of that turn.
+    - The foot was turned (by hand, by a parent, by an animation, the toes with it): the plane
+      is where it was, and the pitch changes by how far the foot was turned.
+
+    Nothing is moved. From then on the heel works against the new plane, and until something
+    turns the toes again it behaves as it always did.
+
+    Returns True when it measured again.
+    """
+    global suspended
+    if suspended or chain.chain_type != "LEG" or not solving_enabled() or not is_rotated(chain):
+        return False
+    _, _, foot, toes = _pose_bones(obj, chain)
+    if not (toes and toes.parent == foot):
+        return False
+    target = end_target(obj, chain)
+    if at_rest(obj, chain, toes, target):
+        forget_heel(chain)  # reset by hand: flat again, with a flat sole plane
+        return True
+    basis_now = toes.matrix_basis.copy()
+    basis_before = _mat(chain.heel_last_toes)
+    goal_before = _mat(chain.heel_last)
+    toes_turned = not _close(basis_now, basis_before)
+    foot_turned = not _close(target.to_3x3(), goal_before.to_3x3())
+    if not (toes_turned or foot_turned):
+        return False
+    bpy.context.view_layer.update()  # make the pose bone matrices current
+    _, frame, target = heel_frame(obj, chain)
+    lateral = frame.col[0]
+    plane = Quaternion(chain.heel_plane)
+    pitch = chain.heel_done[0]
+    if foot_turned:
+        turned = (target.to_3x3() @ goal_before.to_3x3().inverted()).to_quaternion()
+        pitch += _twist(plane.inverted() @ turned @ plane, lateral)
+    if toes_turned:
+        parent_world = (target @ _rest_rel(toes.bone)).to_3x3()
+        change = (parent_world @ (basis_now @ basis_before.inverted()).to_3x3() @ parent_world.inverted()).to_quaternion()
+        plane = change @ plane
+        pitch -= _twist(change, lateral)
+    suspended = True
+    try:
+        chain.heel_plane = plane
+        chain.heel_pitch = pitch
+        chain.heel_done = (pitch, chain.heel_done[1], chain.heel_done[2])
+    finally:
+        suspended = False
+    chain.heel_toes_edited = True  # the foot is not where the first pose would put it
+    chain.heel_last_toes = _flat(basis_now)
+    chain.heel_last = _flat(target)
+    return True
 
 
 def _rest_rel(bone):
@@ -618,6 +804,9 @@ def mirror_chain(obj, chain):
                 partner.heel_roll = -chain.heel_roll
                 partner.heel_yaw = -chain.heel_yaw
                 partner.heel_done = (chain.heel_done[0], -chain.heel_done[1], -chain.heel_done[2])
+                partner.heel_toes_edited = chain.heel_toes_edited
+                plane = Quaternion(chain.heel_plane)
+                partner.heel_plane = (plane.w, plane.x, -plane.y, -plane.z)
             finally:
                 suspended = False
             _, _, _, toes = _pose_bones(obj, chain)
@@ -626,6 +815,7 @@ def mirror_chain(obj, chain):
                 moved = _unscaled(toes.matrix) @ _unscaled(toes.bone.matrix_local).inverted()
                 desired = _MIRROR_X @ moved @ _MIRROR_X @ _unscaled(partner_toes.bone.matrix_local)
                 _set_basis(partner_toes, foot_matrix, desired)
+                partner.heel_last_toes = _flat(partner_toes.matrix_basis)
         else:
             solve_limb(obj, partner, _mirror_target(obj, chain, partner, end_target(obj, chain)))
 

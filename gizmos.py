@@ -2,7 +2,7 @@ import bpy
 from bpy_extras import view3d_utils
 from mathutils import Matrix, Vector, geometry
 
-from . import heel, keying
+from . import grab, heel, keying
 from .properties import pose_anchor
 
 AXIS_COLORS = ((0.9, 0.25, 0.3), (0.5, 0.8, 0.2), (0.3, 0.5, 0.95))  # X, Y, Z like the Move tool
@@ -241,9 +241,13 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
     def _show_ends(self):
         return bpy.context.window_manager.live_ik_show_ends
 
+    def _show_poles(self):
+        return bpy.context.window_manager.live_ik_show_poles
+
     def _key(self, obj):
         chains = tuple((c.chain_type, c.visible) for c in obj.live_ik.chains)
-        return (obj.name, self._mode(), self._show_ends(), self._show_heels(), chains)
+        editing = tuple(sorted(index for name, index in grab.editing_poles if name == obj.name))
+        return (obj.name, self._mode(), self._show_ends(), self._show_poles(), editing, self._show_heels(), chains)
 
     def refresh(self, context):
         obj = context.object
@@ -265,7 +269,8 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
             elif mode == "MOVE":
                 if self._show_ends():
                     self._add_position_handle(obj, i, "end")
-                self._add_position_handle(obj, i, "pole_pos")
+                if self._show_poles() or (obj.name, i) in grab.editing_poles:
+                    self._add_position_handle(obj, i, "pole_pos")
                 if leg and self._show_heels():
                     self._add_dials(obj, i)
         self._built = self._key(obj)

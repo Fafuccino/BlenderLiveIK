@@ -202,6 +202,7 @@ class LIVEIK_PT_main(bpy.types.Panel):
         col = layout.column(align=True)
         col.active = context.window_manager.live_ik_gizmo_mode == "MOVE"  # these handles live in Move mode
         col.prop(context.window_manager, "live_ik_show_ends")
+        col.prop(context.window_manager, "live_ik_show_poles")
         col.prop(context.window_manager, "live_ik_show_heels")
 
         off = context.window_manager.live_ik_gizmo_mode == "OFF"

@@ -42,12 +42,22 @@ _CHAIN_PROPS = (
     "heel_roll",
     "heel_yaw",
     "heel_done",
+    "heel_neutral",
+    "heel_neutral_toes",
+    "heel_last",
+    "heel_last_toes",
+    "heel_toes_edited",
+    "heel_plane",
     "pole_pos",
 )
 
 END, POLE = "end", "pole"
 
 _KEYMAPS = []
+
+# The poles being moved right now, as (object name, chain index): the gizmos show them even when
+# Show Poles is off, so the point being dragged can be seen.
+editing_poles = set()
 
 
 def grabbed(context):
@@ -208,6 +218,10 @@ class LIVEIK_OT_grab(bpy.types.Operator):
                 anchor = pose_anchor(obj, chain, "pole_pos")
                 self.starts.append((anchor, anchor @ Vector(chain.pole_pos)))
         self.saved = snapshot(obj, grabs)
+        editing_poles.clear()
+        editing_poles.update((obj.name, index) for index, kind in zip(self.indices, self.kinds) if kind == POLE)
+        if editing_poles:
+            context.area.tag_redraw()
         # The mouse is followed at the depth of what is selected, so the joint stays under it.
         first = context.selected_pose_bones[0]
         self.depth = obj.matrix_world @ first.head
@@ -222,6 +236,10 @@ class LIVEIK_OT_grab(bpy.types.Operator):
 
     def _finish(self, context):
         context.workspace.status_text_set(None)
+        if editing_poles:
+            editing_poles.clear()
+            if context.area:
+                context.area.tag_redraw()
 
     def modal(self, context, event):
         if event.type == "MOUSEMOVE":

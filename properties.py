@@ -343,6 +343,12 @@ class LiveIKChain(bpy.types.PropertyGroup):
     heel_neutral_toes: FloatVectorProperty(name="Neutral Toes", size=16, default=IDENTITY_MATRIX)
     heel_last: FloatVectorProperty(name="Last", size=16, default=IDENTITY_MATRIX)
     heel_last_toes: FloatVectorProperty(name="Last Toes", size=16, default=IDENTITY_MATRIX)
+    # The toes were turned by hand while the heel was turned: their neutral pose is no longer theirs.
+    heel_toes_edited: BoolProperty(name="Toes Edited", default=False)
+    # The sole plane: the rotation (armature space, about the toes' head) of the plane the foot
+    # lies on, away from the ground. Identity while only the heel moves the foot; when the toes
+    # are turned some other way it is turned with them, and the heel then works against it.
+    heel_plane: FloatVectorProperty(name="Sole Plane", subtype="QUATERNION", size=4, default=(1.0, 0.0, 0.0, 0.0))
     # What the IK solver remembers (row-major matrices): the target it was given, the foot
     # matrix it left in armature space, and the foot's local pose it left. See heel.end_target.
     end_goal: FloatVectorProperty(name="Foot Goal", size=16, default=IDENTITY_MATRIX)
@@ -421,6 +427,13 @@ def register():
         default=True,
         update=_redraw,
     )
+    bpy.types.WindowManager.live_ik_show_poles = BoolProperty(
+        name="Show Poles",
+        description="In Move mode, always show the pole of each visible chain. Off: a pole is only shown "
+        "while it is being moved with G on the thigh or calf (arm or forearm)",
+        default=True,
+        update=_redraw,
+    )
     bpy.types.WindowManager.live_ik_show_heels = BoolProperty(
         name="Show Heels",
         description="In Move mode, show the heel dials that rotate each foot around its pivot",
@@ -444,6 +457,7 @@ def register():
 def unregister():
     del bpy.types.WindowManager.live_ik_orientation
     del bpy.types.WindowManager.live_ik_show_heels
+    del bpy.types.WindowManager.live_ik_show_poles
     del bpy.types.WindowManager.live_ik_show_ends
     del bpy.types.WindowManager.live_ik_gizmo_mode
     del bpy.types.Object.live_ik

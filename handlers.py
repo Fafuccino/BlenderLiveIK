@@ -41,6 +41,7 @@ def _solve_pending():
             for chain in obj.live_ik.chains:
                 if chain.ik_enabled:
                     heel.sync_ik(obj, chain, user_edit)
+                heel.recalibrate_heel(obj, chain)  # the toes may have been turned by something else
     _frame_changed.clear()
     return None
 
@@ -67,7 +68,7 @@ def on_depsgraph_update(scene, depsgraph):
             if frame_changed:
                 _pending.add(obj.name)
                 _frame_changed.add(obj.name)
-            elif any(chain.ik_enabled for chain in obj.live_ik.chains):
+            elif any(chain.ik_enabled or heel.is_rotated(chain) for chain in obj.live_ik.chains):
                 _pending.add(obj.name)
     # Our own solving updates the depsgraph again; that pass finds nothing moved and stops.
     if (_pending or _renamed) and not _scheduled:
