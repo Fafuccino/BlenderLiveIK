@@ -257,7 +257,7 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
         return bpy.context.window_manager.live_ik_show_poles
 
     def _key(self, obj):
-        chains = tuple((c.chain_type, c.visible, c.heel_locked) for c in obj.live_ik.chains)
+        chains = tuple((c.chain_type, c.visible, c.heel_locked, c.joint_pinned) for c in obj.live_ik.chains)
         editing = tuple(sorted(index for name, index in grab.editing_poles if name == obj.name))
         return (obj.name, self._mode(), self._show_ends(), self._show_poles(), editing, self._show_heels(), chains)
 
@@ -282,7 +282,7 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
                 if self._show_ends():
                     self._add_position_handle(obj, i, "end")
                 if self._show_poles() or (obj.name, i) in grab.editing_poles:
-                    self._add_position_handle(obj, i, "pole_pos")
+                    self._add_position_handle(obj, i, grab.pole_prop(chain))
                 if leg and self._show_heels():
                     self._add_dials(obj, i)
         self._built = self._key(obj)

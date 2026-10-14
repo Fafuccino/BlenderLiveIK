@@ -22,6 +22,7 @@ from .properties import (
     _unscaled,
     bone_pose_matrix,
     mirror_partner,
+    pole_point,
     pose_anchor,
     rest_anchor,
     reparent_pole,
@@ -687,6 +688,16 @@ def solve_limb(obj, chain, target):
     to_foot = b1.matrix_local.inverted() @ b2.head_local  # foot head in calf space
     upper, lower = to_calf.length, to_foot.length
 
+    goal = target  # what the chain remembers as asked for, whatever the pin makes of it
+    pole = pole_point(obj, chain)
+    if chain.joint_pinned:
+        # The joint is held at its pin, so the lower bone can only swing about it: the end
+        # goes where the target lies in that direction, at the length of the bone.
+        away = target.translation - pole
+        if away.length > 1e-6:
+            target = target.copy()
+            target.translation = pole + away * (lower / away.length)
+
     reach = target.translation - root
     distance = reach.length
     if distance < 1e-6:
@@ -697,7 +708,6 @@ def solve_limb(obj, chain, target):
     # Law of cosines: the joint sits `along` the reach line and `height` off it.
     along = (upper * upper - lower * lower + distance * distance) / (2 * distance)
     height = sqrt(max(upper * upper - along * along, 0.0))
-    pole = pose_anchor(obj, chain, "pole_pos") @ Vector(chain.pole_pos)
     side = pole - root
     side -= toward * side.dot(toward)
     if side.length < 1e-6:
@@ -733,7 +743,7 @@ def solve_limb(obj, chain, target):
     _set_basis(calf, thigh_matrix, calf_matrix)
     _set_basis(foot, calf_matrix, foot_matrix)
     parent = ik_parent_matrix(obj, chain)
-    chain.end_goal = _flat(parent.inverted() @ target)
+    chain.end_goal = _flat(parent.inverted() @ goal)
     chain.end_parent_left = _flat(parent)
     chain.end_left = _flat(foot_matrix)
     chain.end_basis_left = _flat(foot.matrix_basis)
@@ -829,6 +839,8 @@ def mirror_pole(obj, chain):
             world = _mirror_point(pose_anchor(obj, chain, "pole_pos") @ Vector(chain.pole_pos))
             partner.pole_pos = pose_anchor(obj, partner, "pole_pos").inverted() @ world
             partner.pole_angle = -chain.pole_angle  # mirrored, the swing goes the other way round
+            if chain.joint_pinned and partner.joint_pinned:
+                partner.joint_pos = _mirror_point(Vector(chain.joint_pos))
 
 
 def mirror_pivot(obj, chain):

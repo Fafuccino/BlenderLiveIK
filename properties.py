@@ -8,7 +8,7 @@ from bpy.props import (
     IntProperty,
     StringProperty,
 )
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 CHAIN_TYPES = [
     ("ARM", "Arm", "Arm, Forearm, Hand"),
@@ -95,6 +95,8 @@ def _anchor_name(obj, chain, prop):
     b0, _, b2, _ = _bones(obj, chain)
     if prop == "heel_pos":
         return b2.name if b2 else None
+    if prop == "joint_pos":
+        return None  # the pinned joint is a point of the armature
     if chain.pole_pinned:
         return None  # pinned: the pole stays where it is while the bones above the chain move
     if valid_ik_parent(obj, chain):
@@ -135,6 +137,13 @@ def pose_anchor(obj, chain, prop):
     name = _anchor_name(obj, chain, prop)
     pose_bone = obj.pose.bones.get(name) if name and obj.pose else None
     return _unscaled(pose_bone.matrix) if pose_bone else Matrix.Identity(4)
+
+
+def pole_point(obj, chain):
+    """Armature-space point the limb bends toward: the pinned joint, or else the pole."""
+    if chain.joint_pinned:
+        return Vector(chain.joint_pos)
+    return pose_anchor(obj, chain, "pole_pos") @ Vector(chain.pole_pos)
 
 
 def default_pole(obj, chain):
@@ -234,6 +243,7 @@ def _on_chain_changed(self, context):
         with heel.no_mirroring():  # setting a chain up must not overwrite its partner
             heel.clear(self)
             compute_defaults(obj, self)
+            self.joint_pinned = False  # the bones are not the ones the joint was pinned on
     for area in context.screen.areas:
         area.tag_redraw()
 
@@ -279,6 +289,77 @@ def _on_pole_pin_changed(self, context):
     partner = heel.symmetry_partner(obj, self)
     if partner and partner.pole_pinned != self.pole_pinned:
         partner.pole_pinned = self.pole_pinned
+    _redraw(self, context)
+
+
+def _on_joint_moved(self, context):
+    from . import heel
+
+    obj = _armature(self)
+    if obj:
+        heel.resolve(obj, self)
+        heel.mirror_pole(obj, self)
+    _redraw(self, context)
+
+
+def adopt_pose(obj, chain):
+    """Make the pole and the IK target describe the pose the limb is in, so the next solve keeps it.
+
+    A pinned joint bends the limb on its own and swings the end about itself: the pole and the
+    target the chain remembers say something else. Without the pole, the elbow would jump to it
+    the next time the end is moved; without the target, the hand would.
+    """
+    from . import heel
+
+    thigh, calf, foot = (obj.pose.bones.get(name) for name in (chain.bone_0, chain.bone_1, chain.bone_2))
+    if not (thigh and calf and foot):
+        return
+    bpy.context.view_layer.update()  # the pose bone matrices must be current
+    root, mid, end = thigh.head.copy(), calf.head.copy(), foot.head.copy()
+    point = None
+    toward = end - root
+    if toward.length > 1e-6:
+        toward.normalize()
+        side = (mid - root) - toward * (mid - root).dot(toward)
+        if side.length > 1e-6:  # a straight limb has no bend to keep
+            # The solver turns the bend by the pole angle: the pole is put where that gives this bend.
+            side = Quaternion(toward, -chain.pole_angle) @ side.normalized()
+            length = (mid - root).length + (end - mid).length
+            point = root + toward * (mid - root).dot(toward) + side * length * 0.5
+    parent = heel.ik_parent_matrix(obj, chain)
+    with heel.no_mirroring():
+        heel.suspended = True  # nothing is posed: the limb is already as these describe it
+        try:
+            chain.end_goal = heel._flat(parent.inverted() @ _unscaled(foot.matrix))
+            if point is not None:
+                chain.pole_pos = pose_anchor(obj, chain, "pole_pos").inverted() @ point
+        finally:
+            heel.suspended = False
+
+
+def _on_joint_pin_changed(self, context):
+    from . import heel
+
+    if quiet:
+        return
+    obj = _armature(self)
+    if not obj:
+        return
+    joint = obj.pose.bones.get(self.bone_1) if obj.pose else None
+    if not self.joint_pinned and joint and self.ik_enabled:
+        adopt_pose(obj, self)
+    if self.joint_pinned and joint:
+        # The pin goes where the joint is now, so pinning does not move anything.
+        bpy.context.view_layer.update()  # the pose bone matrices must be current
+        with heel.no_mirroring():
+            heel.suspended = True
+            try:
+                self.joint_pos = joint.head
+            finally:
+                heel.suspended = False
+    partner = heel.symmetry_partner(obj, self)
+    if partner and partner.joint_pinned != self.joint_pinned:
+        partner.joint_pinned = self.joint_pinned
     _redraw(self, context)
 
 
@@ -395,6 +476,20 @@ class LiveIKChain(bpy.types.PropertyGroup):
     end_root_left: FloatVectorProperty(name="Root Left", size=16, default=IDENTITY_MATRIX)
     # The bone the pole was last measured from, to move it when that changes.
     pole_anchor: StringProperty(name="Pole Anchor")
+    joint_pinned: BoolProperty(
+        name="Pin Joint",
+        description="Hold the knee or elbow (where the thigh or arm ends and the calf or forearm starts) at "
+        "its pinned point, as far as the lengths of the bones allow: the foot or hand can then only swing about it",
+        default=False,
+        update=_on_joint_pin_changed,
+    )
+    joint_pos: FloatVectorProperty(
+        name="Pinned Joint",
+        description="Where the knee or elbow is held, in the armature's space",
+        subtype="TRANSLATION",
+        size=3,
+        update=_on_joint_moved,
+    )
     pole_pinned: BoolProperty(
         name="Pin Pole",
         description="Keep the pole (so the knee or elbow) where it is while the bones above the chain move, "

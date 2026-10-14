@@ -17,6 +17,11 @@ IK chains with IK on follow along. Their end (foot, hand) keeps its IK target wh
 leaves it where it is, so the limb bends to keep it planted while the bones above it move (a
 hand holding a ledge while the body is moved); when the transform moves the end, its target goes
 with it. The solver then poses the chain's bones, whatever the transform did to them.
+
+The same keys also act on the bones above a chain whose joint is pinned (see above_pins): the
+bones move as Blender would move them, and the bone the chain hangs from (the shoulder) is turned
+so the chain's first bone stays one upper bone away from the pin. The update handler then solves
+the chain, and the joint stays where it was pinned.
 """
 
 import math
@@ -137,55 +142,79 @@ class LIVEIK_OT_parent_chain_transform(bpy.types.Operator):
         coord = (event.mouse_region_x, event.mouse_region_y)
         return view3d_utils.region_2d_to_location_3d(context.region, context.region_data, coord, self.depth)
 
-    def invoke(self, context, event):
+    def _plan(self, context):
+        """What the transform acts on, or None to leave the key to Blender.
+
+        Returns (moved, pinned, selected, frame, joint): the bones that are transformed, the bones
+        held in place, the selected ones (their median is the pivot), the bone whose axes a local
+        constraint follows, and the bone whose head is the pivot instead (None for the median).
+        """
         found = driven(context)
         if not found:
-            return {"PASS_THROUGH"}
+            return None
         names, selected = found
-        obj = context.object
-        bpy.context.view_layer.update()  # the pose bone matrices must be current
-        bones = obj.pose.bones
-
+        bones = context.object.pose.bones
         # The bones from the first selected one on move; the ones before it stay.
         first = min(i for i, name in enumerate(names) if name in selected)
         follow = names[first:]
         tail_parent = bones[names[-1]].parent
         if tail_parent and tail_parent.name not in names[:first]:
             follow.append(tail_parent.name)
-        self.moved = list(dict.fromkeys(follow + [name for name in selected if name not in names]))
-        self.pinned = names[:first]
+        moved = list(dict.fromkeys(follow + [name for name in selected if name not in names]))
+        # The bone before the first one moved is its parent in the chain: it stays, and the
+        # rest turns about the joint where they meet (that bone's head).
+        return moved, names[:first], [n for n in names if n in selected], names[first], names[first - 1] if first else None
+
+    def _chains(self, obj):
+        """The IK chains that follow the transform, as ({chain index: IK target}, [(chain, END)]).
+
+        Each is asked to reach where its end bone was (armature space), moved by whatever
+        happens to that bone."""
+        goals = {}
+        bones = obj.pose.bones
+        if heel.solving_enabled():
+            for index, chain in enumerate(obj.live_ik.chains):
+                if chain.ik_enabled and all(name in bones for name in (chain.bone_0, chain.bone_1, chain.bone_2)):
+                    goals[index] = heel.end_target(obj, chain)
+        return goals, [(obj.live_ik.chains[index], grab.END) for index in goals]
+
+    def _adjust(self, change):
+        """The change the mouse asks for, as the transform allows it (armature space), and the
+        matrices of other bones that have to be posed along with it ({name: matrix})."""
+        return change, {}
+
+    def invoke(self, context, event):
+        plan = self._plan(context)
+        if not plan:
+            return {"PASS_THROUGH"}
+        self.moved, self.pinned, selected, frame, joint = plan
+        obj = context.object
+        bpy.context.view_layer.update()  # the pose bone matrices must be current
+        bones = obj.pose.bones
 
         self.obj_name = obj.name
         self.matrices = {pose_bone.name: pose_bone.matrix.copy() for pose_bone in bones}
         self.bases = {name: bones[name].matrix_basis.copy() for name in self.moved + self.pinned}
-
-        # The chains with IK on follow the transform: each is asked to reach where its end bone
-        # was (armature space), moved by whatever happens to that bone.
-        self.goals = {}
-        if heel.solving_enabled():
-            for index, chain in enumerate(obj.live_ik.chains):
-                if chain.ik_enabled and all(name in bones for name in (chain.bone_0, chain.bone_1, chain.bone_2)):
-                    self.goals[index] = heel.end_target(obj, chain)
-        self.saved = grab.snapshot(obj, [(obj.live_ik.chains[index], grab.END) for index in self.goals])
+        self.goals, snapshot = self._chains(obj)
+        self.saved = grab.snapshot(obj, snapshot)
 
         world = obj.matrix_world
-        heads = [self.matrices[name].translation for name in names if name in selected]
+        heads = [self.matrices[name].translation for name in selected]
         pivot_mode = context.scene.tool_settings.transform_pivot_point
         if pivot_mode == "CURSOR":
             self.pivot = context.scene.cursor.location.copy()
         elif pivot_mode == "ACTIVE_ELEMENT" and context.active_pose_bone:
             self.pivot = world @ self.matrices[context.active_pose_bone.name].translation
-        elif first > 0:
-            # The bone before the first one moved is its parent in the chain: it stays, and the
-            # rest turns about the joint where they meet (that bone's head).
-            self.pivot = world @ self.matrices[names[first - 1]].translation
+        elif joint:
+            self.pivot = world @ self.matrices[joint].translation
         else:
             self.pivot = world @ (sum(heads, Vector()) / len(heads))
         self.depth = self.pivot
         # The axes of the first bone that is moved, for a local constraint.
-        self.frame = (world.to_quaternion().to_matrix() @ self.matrices[names[first]].to_3x3().normalized())
-        viewer = context.region_data.view_matrix.inverted().translation
-        self.toward = (viewer - self.pivot).normalized()
+        self.frame = (world.to_quaternion().to_matrix() @ self.matrices[frame].to_3x3().normalized())
+        # Which way the view looks back at us: R turns about this axis whatever the pivot's place
+        # on screen, as Blender's does (the direction to the camera would differ in perspective).
+        self.toward = context.region_data.view_matrix.inverted().to_3x3().col[2].normalized()
 
         center = view3d_utils.location_3d_to_region_2d(context.region, context.region_data, self.pivot)
         self.center2d = center if center is not None else self._mouse(event)
@@ -235,9 +264,10 @@ class LIVEIK_OT_parent_chain_transform(bpy.types.Operator):
         if not obj:
             return
         world = obj.matrix_world
-        change = world.inverted() @ self._transform() @ world
+        change, extra = self._adjust(world.inverted() @ self._transform() @ world)
         desired = {name: change @ self.matrices[name] for name in self.moved}
         desired.update({name: self.matrices[name] for name in self.pinned})
+        desired.update(extra)
         matrix_of = place(obj, desired, self.matrices)
         if self.goals:
             bpy.context.view_layer.update()  # the solver reads the bones the chains hang from
@@ -368,19 +398,145 @@ class LIVEIK_OT_parent_chain_transform(bpy.types.Operator):
         self._finish(context)
 
 
+def above_pins(context):
+    """The IK chains with a pinned joint that every selected bone is above, or None.
+
+    A bone is above a chain when it is an ancestor of the chain's first bone (the chest, the
+    shoulder...). None when a Parent Chain has the selection, or any selected bone is not above
+    a chain with IK on and a pinned joint: those keys are Blender's own.
+    """
+    obj = context.object
+    if not obj or obj.type != "ARMATURE" or context.mode != "POSE" or not obj.pose or not heel.solving_enabled():
+        return None
+    selected = {pose_bone.name for pose_bone in context.selected_pose_bones or ()}
+    if not selected or driven(context):
+        return None
+    bones = obj.pose.bones
+    chains, above = [], set()
+    for chain in obj.live_ik.chains:
+        if chain.ik_enabled and chain.joint_pinned and chain.bone_0 in bones and chain.bone_1 in bones:
+            chains.append(chain)
+            parent = bones[chain.bone_0].parent
+            while parent:
+                above.add(parent.name)
+                parent = parent.parent
+    return chains if chains and selected <= above else None
+
+
+class LIVEIK_OT_pin_transform(LIVEIK_OT_parent_chain_transform):
+    bl_idname = "live_ik.pin_transform"
+    bl_label = "Transform Above Pinned Joint"
+    bl_description = (
+        "With the joint of an IK chain pinned, move, rotate or scale the bones it hangs from (the chest, "
+        "the shoulder...) while the pinned joint stays: they can only swing about it. "
+        "X / Y / Z constrain (again for local, with Shift for the plane), Shift is for precision"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(above_pins(context))
+
+    def _plan(self, context):
+        if not above_pins(context):
+            return None
+        selected = [pose_bone.name for pose_bone in context.selected_pose_bones]
+        active = context.active_pose_bone
+        return selected, [], selected, active.name if active and active.name in selected else selected[0], None
+
+    def _chains(self, obj):
+        """The chains under the moved bones are solved by the update handler as the bones move,
+        so they are only noted here, to be put back on a cancel."""
+        bones = obj.pose.bones
+        moved = set(self.moved)
+        self.pins = []
+        affected = []
+        for chain in obj.live_ik.chains:
+            if not (chain.ik_enabled and chain.joint_pinned and chain.bone_0 in bones and chain.bone_1 in bones):
+                continue
+            parent, hangs = bones[chain.bone_0].parent, False
+            while parent and not hangs:
+                hangs = parent.name in moved
+                parent = parent.parent
+            if hangs:
+                affected.append((chain, grab.END))
+                reach = (bones[chain.bone_1].bone.head_local - bones[chain.bone_0].bone.head_local).length
+                # The bone the chain hangs from (the shoulder) is turned to keep the pin, unless it
+                # is one of the bones being moved.
+                holder = bones[chain.bone_0].parent.name
+                if holder in moved:
+                    holder = None
+                else:
+                    self.bases[holder] = bones[holder].matrix_basis.copy()
+                self.pins.append(
+                    (self.matrices[chain.bone_0].translation.copy(), Vector(chain.joint_pos), reach, holder)
+                )
+        return {}, affected
+
+    def _adjust(self, change):
+        """Keep the first bone of each chain one upper bone away from its pin.
+
+        The joint is then exactly where it was put. The bone the chain hangs from (the shoulder)
+        is turned about its head by the least angle that does it, so rotating the chest turns the
+        shoulder with it and nothing slides. A chain with no such bone (the moved bone is the one
+        it hangs from) is kept there by sliding the change instead, except for a rotation, which
+        is left alone: a rotation must not move anything."""
+        shift = Vector((0.0, 0.0, 0.0))
+        if self.mode != "ROTATE":
+            for _ in range(8):  # several chains pull the same bones: this settles on a compromise
+                for root, joint, reach, holder in self.pins:
+                    if holder is None:
+                        here = change @ root + shift
+                        away = here - joint
+                        if away.length > 1e-6 and reach > 1e-6:
+                            shift += joint + away * (reach / away.length) - here
+            change = Matrix.Translation(shift) @ change
+
+        extra = {}
+        for root, joint, reach, holder in self.pins:
+            if holder is None:
+                continue
+            matrix = change @ self.matrices[holder]
+            head = matrix.translation
+            arm = change @ root - head  # from the shoulder's head to where the chain starts
+            toward = joint - head
+            if arm.length < 1e-6 or toward.length < 1e-6 or reach < 1e-6:
+                continue
+            distance, radius = toward.length, arm.length
+            axis = toward / distance
+            if abs(radius - reach) <= distance <= radius + reach:
+                # Where the sphere the chain can reach with the shoulder turned meets the one
+                # about the pin: a circle, and the nearest point of it is the least turn.
+                along = (radius * radius - reach * reach + distance * distance) / (2 * distance)
+                around = max(radius * radius - along * along, 0.0) ** 0.5
+                side = arm - axis * arm.dot(axis)
+                side = side.normalized() if side.length > 1e-6 else axis.orthogonal().normalized()
+                point = axis * along + side * around
+            else:
+                point = axis * radius  # out of reach: as near to the pin as it can get
+            turn = arm.rotation_difference(point).to_matrix().to_4x4()
+            extra[holder] = Matrix.Translation(head) @ turn @ Matrix.Translation(-head) @ matrix
+        return change, extra
+
+
+_OPERATORS = (LIVEIK_OT_parent_chain_transform, LIVEIK_OT_pin_transform)
+
+
 def register():
-    bpy.utils.register_class(LIVEIK_OT_parent_chain_transform)
+    for cls in _OPERATORS:
+        bpy.utils.register_class(cls)
     config = bpy.context.window_manager.keyconfigs.addon
     if config:  # there is none when Blender runs without a window
         keymap = config.keymaps.new(name="Pose", space_type="EMPTY")
-        for key, mode in (("G", "TRANSLATE"), ("R", "ROTATE"), ("S", "SCALE")):
-            item = keymap.keymap_items.new(LIVEIK_OT_parent_chain_transform.bl_idname, key, "PRESS")
-            item.properties.mode = mode
-            _KEYMAPS.append((keymap, item))
+        for operator in _OPERATORS:
+            for key, mode in (("G", "TRANSLATE"), ("R", "ROTATE"), ("S", "SCALE")):
+                item = keymap.keymap_items.new(operator.bl_idname, key, "PRESS")
+                item.properties.mode = mode
+                _KEYMAPS.append((keymap, item))
 
 
 def unregister():
     for keymap, item in _KEYMAPS:
         keymap.keymap_items.remove(item)
     _KEYMAPS.clear()
-    bpy.utils.unregister_class(LIVEIK_OT_parent_chain_transform)
+    for cls in reversed(_OPERATORS):
+        bpy.utils.unregister_class(cls)

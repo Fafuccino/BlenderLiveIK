@@ -188,6 +188,7 @@ class LIVEIK_OT_symmetrize(bpy.types.Operator):
         target.symmetric = source.symmetric
         target.pole_angle = -source.pole_angle
         target.pole_pinned = source.pole_pinned
+        target.joint_pinned = source.joint_pinned
         target.ik_parent = ""
         if source.ik_parent:
             # A parent without a counterpart (root, hips...) is shared by both sides.
@@ -200,6 +201,8 @@ class LIVEIK_OT_symmetrize(bpy.types.Operator):
                 continue
             point = rest_anchor(obj, source, prop) @ Vector(getattr(source, prop))
             setattr(target, prop, rest_anchor(obj, target, prop).inverted() @ _mirror_x(point))
+        if source.joint_pinned:
+            target.joint_pos = _mirror_x(Vector(source.joint_pos))
         return {"FINISHED"}
 
 
@@ -356,11 +359,18 @@ class LIVEIK_PT_main(bpy.types.Panel):
             pole_box = box.box()
             row = pole_box.row()
             row.label(text="Pole")
-            row.prop(chain, "pole_pinned", text="", icon="PINNED" if chain.pole_pinned else "UNPINNED", toggle=True)
+            row.prop(chain, "pole_pinned", text="Pin Pole", icon="PINNED" if chain.pole_pinned else "UNPINNED", toggle=True)
             row.operator("live_ik.reset_pole", text="", icon="LOOP_BACK").index = i
             col = pole_box.column(align=True)
             col.prop(chain, "pole_offset", text="Position")
             col.prop(chain, "pole_angle")
+
+            joint_box = box.box()
+            row = joint_box.row()
+            row.label(text="Joint")
+            row.prop(chain, "joint_pinned", text="Pin Joint", icon="PINNED" if chain.joint_pinned else "UNPINNED", toggle=True)
+            if chain.joint_pinned:
+                joint_box.prop(chain, "joint_pos", text="Position")
 
             if chain.chain_type == "LEG":
                 heel_box = box.box()
@@ -386,11 +396,12 @@ class LIVEIK_PT_main(bpy.types.Panel):
 
 # The keys the add-on adds in Pose Mode, as (key, what it does). Shown in the Keybinds panel.
 _KEYBINDS = (
-    ("G", "Move the IK target of a foot or hand, or the pole when the thigh or calf (arm or forearm) is selected"),
-    ("Alt+G", "Put the IK target back at its rest position, or the pole at its default"),
+    ("G", "Move the IK target of a foot or hand, or the pole (the pinned joint, if there is one) when the thigh or calf (arm or forearm) is selected"),
+    ("Alt+G", "Put the IK target back at its rest position, or the pole at its default (the pinned joint at its rest position)"),
     ("E", "Turn the heel of a foot about its pivot"),
     ("Ctrl+Alt+E", "Reset the heel"),
     ("G / R / S", "With a Parent Chain on and one of its bones selected: move, rotate or scale it with the bones after it"),
+    ("G / R / S", "With a joint pinned, on the bones it hangs from (chest, shoulder...): they swing about the pinned joint"),
 )
 _KEYBIND_MODAL = (
     ("X / Y / Z", "Constrain to an axis (again: local). Shift+X / Y / Z: to the plane. While turning the heel: pitch / roll / yaw"),

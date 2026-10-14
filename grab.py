@@ -51,9 +51,15 @@ _CHAIN_PROPS = (
     "heel_toes_edited",
     "heel_plane",
     "pole_pos",
+    "joint_pos",
 )
 
 END, POLE = "end", "pole"
+
+
+def pole_prop(chain):
+    """The setting a POLE move changes: the pinned joint, or else the pole."""
+    return "joint_pos" if chain.joint_pinned else "pole_pos"
 
 _KEYMAPS = []
 
@@ -195,7 +201,7 @@ class LIVEIK_OT_grab(bpy.types.Operator):
                 heel.move_end(obj, chain, Matrix.Translation(delta) @ self.starts[number])
             else:
                 anchor, point = self.starts[number]
-                chain.pole_pos = anchor.inverted() @ (point + delta)
+                setattr(chain, pole_prop(chain), anchor.inverted() @ (point + delta))
         self._status(context)
 
     def _draw_axes(self):
@@ -257,8 +263,9 @@ class LIVEIK_OT_grab(bpy.types.Operator):
             if kind == END:
                 self.starts.append(heel.end_target(obj, chain))
             else:
-                anchor = pose_anchor(obj, chain, "pole_pos")
-                self.starts.append((anchor, anchor @ Vector(chain.pole_pos)))
+                prop = pole_prop(chain)
+                anchor = pose_anchor(obj, chain, prop)
+                self.starts.append((anchor, anchor @ Vector(getattr(chain, prop))))
         self.saved = snapshot(obj, grabs)
         editing_poles.clear()
         editing_poles.update((obj.name, index) for index, kind in zip(self.indices, self.kinds) if kind == POLE)
@@ -485,6 +492,8 @@ class LIVEIK_OT_reset_end(bpy.types.Operator):
                     continue
                 target = heel.end_target(obj, chain)
                 heel.move_end(obj, chain, Matrix.Translation(rest - target.translation) @ target)
+            elif chain.joint_pinned:
+                chain.joint_pos = obj.data.bones[chain.bone_1].head_local  # the joint at rest
             else:
                 default_pole(obj, chain)
         return {"FINISHED"}
