@@ -31,7 +31,7 @@ import gpu
 from bpy.props import EnumProperty
 from bpy_extras import view3d_utils
 from gpu_extras.batch import batch_for_shader
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 from . import grab, heel, keying
 from .properties import _unscaled
@@ -227,7 +227,13 @@ class _TransformOperator(bpy.types.Operator):
         self.axis = None
         self.plane = False
         self.local = False
+        self.trackball = False  # R again while rotating: the mouse turns it about the view's own axes
+        self.virtual = Vector((0.0, 0.0))  # how far the mouse has gone since the trackball began, in pixels
+        view = context.region_data.view_matrix.inverted().to_3x3()
+        self.right, self.up = view.col[0].normalized(), view.col[1].normalized()
+        self.mouse = self._mouse(event)
         self._handle = bpy.types.SpaceView3D.draw_handler_add(self._draw_axes, (), "WINDOW", "POST_VIEW")
+        self._cursor = bpy.types.SpaceView3D.draw_handler_add(self._draw_cursor, (), "WINDOW", "POST_PIXEL")
         context.window_manager.modal_handler_add(self)
         self._status(context)
         return {"RUNNING_MODAL"}
@@ -240,13 +246,26 @@ class _TransformOperator(bpy.types.Operator):
             return self.frame.col[self.axis].normalized()
         return Vector(tuple(1.0 if i == self.axis else 0.0 for i in range(3)))
 
+    def _trackball(self):
+        """The trackball rotation, as Blender works it out (transform_mode_trackball.cc).
+
+        The mouse's distance from where the trackball began, 0.01 radian per pixel (down about the
+        view's horizontal axis, right about its vertical one), makes one rotation: the axis is the
+        two axes weighted by those angles and the angle is the length of that. It is a function of
+        where the mouse is, not a sum of its steps, so going round in circles brings it back."""
+        axis = self.right * (-self.virtual.y * 0.01) + self.up * (self.virtual.x * 0.01)
+        angle = axis.length
+        return Quaternion(axis / angle, angle) if angle > 1e-9 else Quaternion()
+
     def _transform(self, pivot=None):
         """The change, as a world-space matrix, about the pivot (the one chosen, unless given)."""
         direction = self._direction()
         if self.mode == "TRANSLATE":
             return Matrix.Translation(grab.constrain(self.offset, self.axis, self.plane, direction))
         about = Matrix.Translation(self.pivot if pivot is None else pivot)
-        if self.mode == "ROTATE":
+        if self.mode == "ROTATE" and self.trackball:
+            change = self._trackball().to_matrix().to_4x4()
+        elif self.mode == "ROTATE":
             if direction is None:
                 axis, sign = self.toward, 1  # about the view, like Blender's R
             else:
@@ -335,12 +354,15 @@ class _TransformOperator(bpy.types.Operator):
         if self.mode == "TRANSLATE":
             d = self.offset
             value = f"{d.x:+.3f} {d.y:+.3f} {d.z:+.3f}"
+        elif self.mode == "ROTATE" and self.trackball:
+            value = "trackball"
         elif self.mode == "ROTATE":
             value = f"{math.degrees(self.angle):+.1f} deg"
         else:
             value = f"x{self.factor:.3f}"
+        trackball = "R: trackball   " if self.mode == "ROTATE" else ""
         context.workspace.status_text_set(
-            f"{_WORDS[self.mode]} parent chain  {value}{where}   "
+            f"{_WORDS[self.mode]} parent chain  {value}{where}   {trackball}"
             "X/Y/Z: constrain (again: local)   Shift+X/Y/Z: plane   Shift: precision   "
             "LMB / Enter: confirm   Esc / RMB: cancel"
         )
@@ -367,7 +389,83 @@ class _TransformOperator(bpy.types.Operator):
             batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)
         gpu.state.blend_set("NONE")
 
+    def _set_trackball(self, context, on):
+        """Switch the trackball on or off, each time from the start. Blender hides the cursor
+        while it is on and draws its four arrows there instead."""
+        self.trackball = on
+        self.angle = 0.0
+        self.virtual = Vector((0.0, 0.0))
+        if context.window:
+            if on:
+                context.window.cursor_modal_set("NONE")
+            else:
+                context.window.cursor_modal_restore()
+
+    def _draw_trackball_cursor(self):
+        """Blender's trackball helper at the mouse: arrows across (red) and up and down (green)."""
+        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+        region = bpy.context.region
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        shader.uniform_float("lineWidth", 2.0)
+        gpu.state.blend_set("ALPHA")
+        centre = self.mouse
+        gap, length, head = 5.0, 16.0, 5.0
+        for direction, color in ((Vector((1.0, 0.0)), _AXIS_COLORS[0]), (Vector((0.0, 1.0)), _AXIS_COLORS[1])):
+            across = Vector((-direction.y, direction.x))
+            segments = []
+            for sign in (1.0, -1.0):
+                start, tip = centre + direction * gap * sign, centre + direction * length * sign
+                segments += [start, tip]
+                for side in (1.0, -1.0):
+                    segments += [tip, tip - direction * head * sign + across * head * side]
+            shader.uniform_float("color", color)
+            points = [(point.x, point.y, 0.0) for point in segments]
+            batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)
+        gpu.state.blend_set("NONE")
+
+    def _draw_cursor(self):
+        """The dashed line from the pivot to the mouse, with the arrow at the mouse that says
+        which way it is read: across the line to rotate, along it to scale (like Blender's)."""
+        if self.mode == "ROTATE" and self.trackball:
+            self._draw_trackball_cursor()
+            return
+        if self.mode == "TRANSLATE":
+            return
+        start, end = self.center2d, self.mouse
+        along = end - start
+        if along.length < 1.0:
+            return
+        along = along / along.length
+        segments = []
+        t = 0.0
+        length = (end - start).length
+        while t < length:  # the dashes
+            segments += [start + along * t, start + along * min(t + 6.0, length)]
+            t += 11.0
+        direction = Vector((-along.y, along.x)) if self.mode == "ROTATE" else along
+        arrow, head = 12.0, 5.0
+        for sign in (1.0, -1.0):  # the two heads of the arrow
+            tip = end + direction * arrow * sign
+            segments += [end, tip]
+            for side in (1.0, -1.0):
+                back = Vector((-direction.y, direction.x)) * side * head * 0.7 - direction * sign * head
+                segments += [tip, tip + back]
+        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+        region = bpy.context.region
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        shader.uniform_float("lineWidth", 1.5)
+        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.9))
+        gpu.state.blend_set("ALPHA")
+        points = [(point.x, point.y, 0.0) for point in segments]
+        batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)
+        gpu.state.blend_set("NONE")
+
     def _finish(self, context):
+        if self.trackball and context.window:
+            context.window.cursor_modal_restore()
+        if getattr(self, "_cursor", None) is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._cursor, "WINDOW")
+            self._cursor = None
         if getattr(self, "_handle", None) is not None:
             bpy.types.SpaceView3D.draw_handler_remove(self._handle, "WINDOW")
             self._handle = None
@@ -390,14 +488,29 @@ class _TransformOperator(bpy.types.Operator):
                 location = self._mouse_location(context, event)
                 self.offset += (location - self.last_location) * scale
                 self.last_location = location
+            elif self.mode == "ROTATE" and self.trackball:
+                # What the mouse moved this time (the window's own steps, which stay right when the
+                # cursor wraps at the edge), added up; Shift slows it to a thirtieth, like Blender.
+                step = Vector((event.mouse_x - event.mouse_prev_x, event.mouse_y - event.mouse_prev_y))
+                self.virtual += step * (1.0 / 30.0 if event.shift else 1.0)
             elif here.length > 2.0 and self.last.length > 2.0:
                 if self.mode == "ROTATE":
                     self.angle += grab.screen_angle(self.last, here) * scale
                 else:
                     self.factor *= (here.length / self.last.length) ** scale
             self.last = here
+            self.mouse = self._mouse(event)
             self._apply(context)
+            context.area.tag_redraw()
+        elif event.type == "R" and event.value == "PRESS" and not event.is_repeat and self.mode == "ROTATE":
+            # Back and forth between turning about the view and the trackball, each from the start.
+            self._set_trackball(context, not self.trackball)
+            self.axis, self.local = None, False
+            self._apply(context)
+            context.area.tag_redraw()
         elif event.type in {"X", "Y", "Z"} and event.value == "PRESS":
+            if self.trackball:
+                self._set_trackball(context, False)  # an axis: back to turning about it
             axis = "XYZ".index(event.type)
             plane = event.shift and self.mode != "ROTATE"
             if self.axis == axis and self.plane == plane:
