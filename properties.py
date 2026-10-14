@@ -302,12 +302,29 @@ def _on_joint_moved(self, context):
     _redraw(self, context)
 
 
+def capture_joint(obj, chain):
+    """Pin the joint (knee, elbow) where it is now, without posing anything."""
+    from . import heel
+
+    joint = obj.pose.bones.get(chain.bone_1) if obj.pose else None
+    if not joint:
+        return
+    bpy.context.view_layer.update()  # the pose bone matrices must be current
+    with heel.no_mirroring():
+        heel.suspended = True
+        try:
+            chain.joint_pos = joint.head
+        finally:
+            heel.suspended = False
+
+
 def adopt_pose(obj, chain):
     """Make the pole and the IK target describe the pose the limb is in, so the next solve keeps it.
 
-    A pinned joint bends the limb on its own and swings the end about itself: the pole and the
-    target the chain remembers say something else. Without the pole, the elbow would jump to it
-    the next time the end is moved; without the target, the hand would.
+    A pinned joint bends the limb on its own and swings the end about itself, and a limb posed
+    with IK off bends as it likes: the pole and the target the chain remembers say something else.
+    Without the pole, the elbow would jump to it the next time the end is moved; without the
+    target, the hand would.
     """
     from . import heel
 
@@ -321,10 +338,10 @@ def adopt_pose(obj, chain):
     if toward.length > 1e-6:
         toward.normalize()
         side = (mid - root) - toward * (mid - root).dot(toward)
-        if side.length > 1e-6:  # a straight limb has no bend to keep
+        length = (mid - root).length + (end - mid).length
+        if side.length > 0.01 * length:  # a (nearly) straight limb has no bend to keep
             # The solver turns the bend by the pole angle: the pole is put where that gives this bend.
             side = Quaternion(toward, -chain.pole_angle) @ side.normalized()
-            length = (mid - root).length + (end - mid).length
             point = root + toward * (mid - root).dot(toward) + side * length * 0.5
     parent = heel.ik_parent_matrix(obj, chain)
     with heel.no_mirroring():
@@ -349,14 +366,7 @@ def _on_joint_pin_changed(self, context):
     if not self.joint_pinned and joint and self.ik_enabled:
         adopt_pose(obj, self)
     if self.joint_pinned and joint:
-        # The pin goes where the joint is now, so pinning does not move anything.
-        bpy.context.view_layer.update()  # the pose bone matrices must be current
-        with heel.no_mirroring():
-            heel.suspended = True
-            try:
-                self.joint_pos = joint.head
-            finally:
-                heel.suspended = False
+        capture_joint(obj, self)  # the pin goes where the joint is now, so pinning moves nothing
     partner = heel.symmetry_partner(obj, self)
     if partner and partner.joint_pinned != self.joint_pinned:
         partner.joint_pinned = self.joint_pinned
@@ -368,6 +378,14 @@ def _on_ik_toggled(self, context):
 
     obj = context.object
     if obj and obj.type == "ARMATURE" and self.ik_enabled:
+        # IK takes over from the pose as it is now. What the solver remembered from before (the
+        # target it was given, the pose it left) describes a pose the limb may have left since:
+        # the body moved or posed by hand with IK off. Keeping it would put the end back there.
+        heel.clear(self)
+        joint = obj.pose.bones.get(self.bone_1) if obj.pose else None
+        if self.joint_pinned and joint:
+            capture_joint(obj, self)
+        adopt_pose(obj, self)
         heel.sync_ik(obj, self)
 
 

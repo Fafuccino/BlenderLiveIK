@@ -18,7 +18,7 @@ from .properties import (
 class LIVEIK_OT_reset_gizmos(bpy.types.Operator):
     bl_idname = "live_ik.reset_gizmos"
     bl_label = "Reset Pole / Heel"
-    bl_description = "Put the IK pole and heel back to their default position for this chain"
+    bl_description = "Put the IK pole and heel back to their default location for this chain"
     # No REGISTER: the index is only meaningful for the button that set it, so the
     # operator must not show up in the redo panel or be replayed by "Repeat Last".
     bl_options = {"UNDO", "INTERNAL"}
@@ -64,7 +64,7 @@ class LIVEIK_OT_reset_heel(bpy.types.Operator):
 class LIVEIK_OT_reset_pole(bpy.types.Operator):
     bl_idname = "live_ik.reset_pole"
     bl_label = "Reset Pole"
-    bl_description = "Put the pole (its position and angle) back at its default"
+    bl_description = "Put the pole (its location and angle) back at its default"
     bl_options = {"UNDO", "INTERNAL"}
 
     index: bpy.props.IntProperty(options={"SKIP_SAVE"})
@@ -228,6 +228,7 @@ class LIVEIK_OT_add_parent_chain(_ParentChainOperator):
             self.report({"WARNING"}, "No room for another Parent Chain")
             return {"CANCELLED"}
         settings.parent_chains.add()
+        _expanded.add((context.object.name, -len(settings.parent_chains)))  # open, to be filled in
         return {"FINISHED"}
 
 
@@ -277,10 +278,18 @@ def _draw_parent_chains(layout, obj):
     header.operator("live_ik.add_parent_chain", text="", icon="ADD")
     for i, chain in enumerate(settings.parent_chains):
         box = layout.box()
+        # Folded like the IK chains, kept under negative numbers so the two kinds do not clash.
+        collapsed = (obj.name, -(i + 1)) not in _expanded
         row = box.row(align=True)
-        row.label(text=f"Parent Chain {i + 1}")
+        arrow = "TRIA_RIGHT" if collapsed else "TRIA_DOWN"
+        row.operator("live_ik.toggle_chain", text="", icon=arrow, emboss=False).index = -(i + 1)
+        first = chain.bones[0].bone if len(chain.bones) else ""
+        title = f"Parent Chain {i + 1}"
+        row.label(text=f"{title}: {first}" if first else title)
         row.prop(chain, "active", text="On" if chain.active else "Off", toggle=True)
         row.operator("live_ik.remove_parent_chain", text="", icon="X", emboss=False).index = i
+        if collapsed:
+            continue
         broken = parent_chain.broken_at(obj, chain)
         for slot, item in enumerate(chain.bones):
             row = box.row(align=True)
@@ -362,7 +371,7 @@ class LIVEIK_PT_main(bpy.types.Panel):
             row.prop(chain, "pole_pinned", text="Pin Pole", icon="PINNED" if chain.pole_pinned else "UNPINNED", toggle=True)
             row.operator("live_ik.reset_pole", text="", icon="LOOP_BACK").index = i
             col = pole_box.column(align=True)
-            col.prop(chain, "pole_offset", text="Position")
+            col.prop(chain, "pole_offset", text="Location")
             col.prop(chain, "pole_angle")
 
             joint_box = box.box()
@@ -370,7 +379,7 @@ class LIVEIK_PT_main(bpy.types.Panel):
             row.label(text="Joint")
             row.prop(chain, "joint_pinned", text="Pin Joint", icon="PINNED" if chain.joint_pinned else "UNPINNED", toggle=True)
             if chain.joint_pinned:
-                joint_box.prop(chain, "joint_pos", text="Position")
+                joint_box.prop(chain, "joint_pos", text="Location")
 
             if chain.chain_type == "LEG":
                 heel_box = box.box()
@@ -380,7 +389,7 @@ class LIVEIK_PT_main(bpy.types.Panel):
                 row.prop(chain, "heel_locked", text="", icon="LOCKED" if chain.heel_locked else "UNLOCKED", emboss=False)
                 col = heel_box.column(align=True)
                 col.enabled = not chain.heel_locked
-                col.prop(chain, "heel_offset", text="Position")
+                col.prop(chain, "heel_offset", text="Location")
 
                 row = heel_box.row()
                 row.label(text="Rotation")
@@ -397,7 +406,7 @@ class LIVEIK_PT_main(bpy.types.Panel):
 # The keys the add-on adds in Pose Mode, as (key, what it does). Shown in the Keybinds panel.
 _KEYBINDS = (
     ("G", "Move the IK target of a foot or hand, or the pole (the pinned joint, if there is one) when the thigh or calf (arm or forearm) is selected"),
-    ("Alt+G", "Put the IK target back at its rest position, or the pole at its default (the pinned joint at its rest position)"),
+    ("Alt+G", "Put the IK target back at its rest location, or the pole at its default (the pinned joint at its rest location)"),
     ("E", "Turn the heel of a foot about its pivot"),
     ("Ctrl+Alt+E", "Reset the heel"),
     ("G / R / S", "With a Parent Chain on and one of its bones selected: move, rotate or scale it with the bones after it"),

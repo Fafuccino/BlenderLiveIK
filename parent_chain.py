@@ -113,23 +113,16 @@ def place(obj, desired, old):
     return matrix_of
 
 
-class LIVEIK_OT_parent_chain_transform(bpy.types.Operator):
-    bl_idname = "live_ik.parent_chain_transform"
-    bl_label = "Transform Parent Chain"
-    bl_description = (
-        "With a Parent Chain on, move, rotate or scale a bone of the chain together with the bones after it. "
-        "X / Y / Z constrain (again for local, with Shift for the plane), Shift is for precision"
-    )
+class _TransformOperator(bpy.types.Operator):
+    """The modal G / R / S the operators below share. Not registered itself: registering a class
+    that is derived from a registered one breaks the base's Python class in Blender."""
+
     bl_options = {"UNDO", "BLOCKING", "GRAB_CURSOR"}
 
     mode: EnumProperty(
         items=[("TRANSLATE", "Move", ""), ("ROTATE", "Rotate", ""), ("SCALE", "Scale", "")],
         options={"SKIP_SAVE"},
     )
-
-    @classmethod
-    def poll(cls, context):
-        return bool(driven(context))
 
     def _object(self):
         return bpy.data.objects.get(self.obj_name)
@@ -398,6 +391,19 @@ class LIVEIK_OT_parent_chain_transform(bpy.types.Operator):
         self._finish(context)
 
 
+class LIVEIK_OT_parent_chain_transform(_TransformOperator):
+    bl_idname = "live_ik.parent_chain_transform"
+    bl_label = "Transform Parent Chain"
+    bl_description = (
+        "With a Parent Chain on, move, rotate or scale a bone of the chain together with the bones after it. "
+        "X / Y / Z constrain (again for local, with Shift for the plane), Shift is for precision"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(driven(context))
+
+
 def above_pins(context):
     """The IK chains with a pinned joint that every selected bone is above, or None.
 
@@ -423,7 +429,7 @@ def above_pins(context):
     return chains if chains and selected <= above else None
 
 
-class LIVEIK_OT_pin_transform(LIVEIK_OT_parent_chain_transform):
+class LIVEIK_OT_pin_transform(_TransformOperator):
     bl_idname = "live_ik.pin_transform"
     bl_label = "Transform Above Pinned Joint"
     bl_description = (
