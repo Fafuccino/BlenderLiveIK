@@ -293,7 +293,7 @@ def _set_heel_offset(self, value):
     from . import heel
 
     obj = _armature(self)
-    if obj:
+    if obj and not self.heel_locked:
         heel.set_pivot_offset(obj, self, Vector(value))
 
 
@@ -345,6 +345,12 @@ class LiveIKChain(bpy.types.PropertyGroup):
     heel_last_toes: FloatVectorProperty(name="Last Toes", size=16, default=IDENTITY_MATRIX)
     # The toes were turned by hand while the heel was turned: their neutral pose is no longer theirs.
     heel_toes_edited: BoolProperty(name="Toes Edited", default=False)
+    heel_locked: BoolProperty(
+        name="Lock Pivot",
+        description="Keep the heel pivot where it is: its gizmo and field can not move it",
+        default=False,
+        update=_redraw,
+    )
     # The sole plane: the rotation (armature space, about the toes' head) of the plane the foot
     # lies on, away from the ground. Identity while only the heel moves the foot; when the toes
     # are turned some other way it is turned with them, and the heel then works against it.

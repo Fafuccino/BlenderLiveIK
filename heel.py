@@ -612,6 +612,8 @@ def recalibrate_heel(obj, chain):
         change = (parent_world @ (basis_now @ basis_before.inverted()).to_3x3() @ parent_world.inverted()).to_quaternion()
         plane = change @ plane
         pitch -= _twist(change, lateral)
+    if abs(pitch) < 1e-4:
+        pitch = 0.0  # measuring leaves a little noise: flat is exactly 0
     suspended = True
     try:
         chain.heel_plane = plane
@@ -831,7 +833,7 @@ def mirror_pole(obj, chain):
 
 def mirror_pivot(obj, chain):
     partner = symmetry_partner(obj, chain)
-    if partner and chain.chain_type == "LEG":
+    if partner and chain.chain_type == "LEG" and not partner.heel_locked:
         with no_mirroring():
             # In the rest pose, like Symmetrize: the pivot is a point of the foot.
             point = rest_anchor(obj, chain, "heel_pos") @ Vector(chain.heel_pos)

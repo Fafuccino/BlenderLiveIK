@@ -248,7 +248,11 @@ class LIVEIK_PT_main(bpy.types.Panel):
             col.prop(chain, "pole_angle")
 
             if chain.chain_type == "LEG":
-                col.prop(chain, "heel_offset", text="Pivot")
+                row = col.row(align=True)
+                field = row.row(align=True)
+                field.enabled = not chain.heel_locked
+                field.prop(chain, "heel_offset", text="Pivot")
+                row.prop(chain, "heel_locked", text="", icon="LOCKED" if chain.heel_locked else "UNLOCKED")
 
                 col = box.column(align=True)
                 row = col.row()

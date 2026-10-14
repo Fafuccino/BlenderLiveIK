@@ -81,6 +81,8 @@ class _Mover:
         obj, chain = self.object_and_chain()
         if not chain or self.start is None:
             return
+        if self.kind == "heel_pos" and chain.heel_locked:
+            return  # a locked pivot does not move, whatever the gizmo says
         delta = obj.matrix_world.to_3x3().inverted() @ delta_world  # to armature space
         if self.kind == "end":
             heel.move_end(obj, chain, Matrix.Translation(delta) @ self.start)
@@ -193,7 +195,13 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
         gz.alpha = alpha
         gz.alpha_highlight = 1.0
 
-    def _add_position_handle(self, obj, index, kind):
+    def _lock(self, gz):
+        """A locked handle is still drawn, in gray, and can not be picked or dragged."""
+        gz.color = gz.color_highlight = (0.5, 0.5, 0.5)
+        gz.alpha = gz.alpha_highlight = 0.35
+        gz.hide_select = True
+
+    def _add_position_handle(self, obj, index, kind, locked=False):
         """Three arrows and three planes that move a point along its own axes."""
         for axis in range(3):
             mover = _Mover(obj.name, index, kind)
@@ -206,6 +214,8 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
             get, set_ = _arrow_accessors(mover, axis)
             arrow.target_set_handler("offset", get=get, set=set_)
             self._handles.append(("arrow", arrow, mover, axis))
+            if locked:
+                self._lock(arrow)
 
             # The plane is named after the axis it is perpendicular to, like Blender's.
             mover = _Mover(obj.name, index, kind)
@@ -215,6 +225,8 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
             plane.mover = mover
             self._style(plane, AXIS_COLORS[axis], alpha=0.5)
             self._handles.append(("plane", plane, mover, axis))
+            if locked:
+                self._lock(plane)
 
     def _add_dials(self, obj, index):
         for axis, prop in enumerate(DIAL_PROPS):
@@ -245,7 +257,7 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
         return bpy.context.window_manager.live_ik_show_poles
 
     def _key(self, obj):
-        chains = tuple((c.chain_type, c.visible) for c in obj.live_ik.chains)
+        chains = tuple((c.chain_type, c.visible, c.heel_locked) for c in obj.live_ik.chains)
         editing = tuple(sorted(index for name, index in grab.editing_poles if name == obj.name))
         return (obj.name, self._mode(), self._show_ends(), self._show_poles(), editing, self._show_heels(), chains)
 
@@ -265,7 +277,7 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
                 continue
             leg = chain.chain_type == "LEG"
             if mode == "SETUP" and leg:
-                self._add_position_handle(obj, i, "heel_pos")
+                self._add_position_handle(obj, i, "heel_pos", locked=chain.heel_locked)
             elif mode == "MOVE":
                 if self._show_ends():
                     self._add_position_handle(obj, i, "end")
@@ -310,6 +322,10 @@ class LIVEIK_GGT_handles(bpy.types.GizmoGroup):
                 rot = (world_rot @ direction).to_track_quat("Z", "Y").to_matrix().to_4x4()
             else:
                 mover = target
+                if mover.kind == "heel_pos":
+                    _, locked_chain = mover.object_and_chain()
+                    if locked_chain and locked_chain.heel_locked:
+                        self._lock(gz)  # gray and out of reach, every redraw
                 if not gz.is_modal:
                     mover.end()  # the drag is over, whatever ended it
                 if mover.start is None:
