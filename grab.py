@@ -432,7 +432,7 @@ class LIVEIK_OT_heel_rotate(bpy.types.Operator):
         # while it is turned, and a centre or an axis that followed it would feed that
         # movement back into the angle that is read from the mouse.
         self.world_rotation = obj.matrix_world.to_quaternion().to_matrix()
-        self.centers, self.feet, self.frames = [], [], []
+        self.centers, self.feet, self.frames, self.start_feet = [], [], [], []
         # The foot is turned about the panel's orientation: the scene's axes (World), the armature's
         # (Rig) or the foot's own as it is posed (Local). Pressing the axis key again swaps it with
         # Local (or with World, when it started as Local).
@@ -443,6 +443,7 @@ class LIVEIK_OT_heel_rotate(bpy.types.Operator):
             pivot, _, _ = heel.heel_frame(obj, chain)
             self.centers.append(obj.matrix_world @ pivot)
             self.feet.append(heel.foot_axes(obj, chain))  # its own axes, kept from the start
+            self.start_feet.append(obj.pose.bones[chain.bone_2].matrix.copy())  # where it began, to find its pivot
             self.frames.append(heel.angle_frame(obj, chain))  # what the angles are measured in
         region, view = context.region, context.region_data
         center = view3d_utils.location_3d_to_region_2d(region, view, self.centers[0])
@@ -544,6 +545,29 @@ class LIVEIK_OT_heel_rotate(bpy.types.Operator):
     def _draw_cursor(self):
         draw_trackball_cursor(self.mouse)
 
+    def _pivot(self, obj, number):
+        """The point the foot is turning about right now, in world space.
+
+        The heel pivot is where the turn is meant to be about, but the foot also moves so the
+        toes stay planted: raising the heel turns it about the toes' head, for instance. So the
+        pivot is read from what the foot has done since the turn began: a rigid motion is a turn
+        about some line, and this is where that line goes. Until the foot has turned (a degree),
+        which line is not defined, and the heel pivot stands for it."""
+        fallback = self.centers[number]
+        foot = obj.pose.bones.get(obj.live_ik.chains[self.indices[number]].bone_2)
+        if not foot:
+            return fallback
+        net = foot.matrix @ self.start_feet[number].inverted()  # armature space
+        axis, angle = net.to_3x3().normalized().to_quaternion().to_axis_angle()
+        if min(angle, 2.0 * math.pi - angle) < 0.02:
+            return fallback
+        move = net.translation
+        across = move - axis * axis.dot(move)  # what is left of the movement across the axis
+        # The turn by `angle` that does this movement: the point it leaves where it is (the
+        # fixed point of x -> R x + move, in the plane across the axis).
+        centre = across * 0.5 + axis.cross(across) * (0.5 / math.tan(angle / 2.0))
+        return obj.matrix_world @ centre
+
     def _draw_axis(self):
         """The axis the heel is turned about, as a line through each pivot in the colour of that axis,
         like the line a locked axis shows in the other modes."""
@@ -557,7 +581,8 @@ class LIVEIK_OT_heel_rotate(bpy.types.Operator):
         shader.uniform_float("color", _AXIS_COLORS[self.axis])
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_test_set("NONE")
-        for number, origin in enumerate(self.centers):
+        for number in range(len(self.centers)):
+            origin = self._pivot(obj, number)
             direction = (self.world_rotation @ self._axis(obj, number)).normalized()
             points = [origin - direction * _LINE_LENGTH, origin + direction * _LINE_LENGTH]
             batch_for_shader(shader, "LINES", {"pos": points}).draw(shader)

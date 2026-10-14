@@ -1,7 +1,7 @@
 bl_info = {
     "name": "LiveIK",
     "author": "fafuccino",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > LiveIK",
     "description": "Pose with IK behavior without setting up IK/FK rigs",
