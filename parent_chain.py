@@ -119,6 +119,8 @@ class _TransformOperator(bpy.types.Operator):
 
     bl_options = {"UNDO", "BLOCKING", "GRAB_CURSOR"}
 
+    individual_ok = False  # may the scene's Individual Origins pivot be followed (see _plan)
+
     mode: EnumProperty(
         items=[("TRANSLATE", "Move", ""), ("ROTATE", "Rotate", ""), ("SCALE", "Scale", "")],
         options={"SKIP_SAVE"},
@@ -154,6 +156,11 @@ class _TransformOperator(bpy.types.Operator):
         if tail_parent and tail_parent.name not in names[:first]:
             follow.append(tail_parent.name)
         moved = list(dict.fromkeys(follow + [name for name in selected if name not in names]))
+        # For Individual Origins: which of the moved bones are selected, and which of those are
+        # not part of the chain (they are turned on their own and carry nothing).
+        self.chain_selected = {name for name in names if name in selected}
+        self.extra_selected = {name for name in selected if name not in names}
+        self.joints = {names[i]: names[i - 1] for i in range(1, len(names))}  # bone -> the bone before it
         # The bone before the first one moved is its parent in the chain: it stays, and the
         # rest turns about the joint where they meet (that bone's head).
         return moved, names[:first], [n for n in names if n in selected], names[first], names[first - 1] if first else None
@@ -194,6 +201,7 @@ class _TransformOperator(bpy.types.Operator):
         world = obj.matrix_world
         heads = [self.matrices[name].translation for name in selected]
         pivot_mode = context.scene.tool_settings.transform_pivot_point
+        self.individual = self.individual_ok and pivot_mode == "INDIVIDUAL_ORIGINS"
         if pivot_mode == "CURSOR":
             self.pivot = context.scene.cursor.location.copy()
         elif pivot_mode == "ACTIVE_ELEMENT" and context.active_pose_bone:
@@ -232,12 +240,12 @@ class _TransformOperator(bpy.types.Operator):
             return self.frame.col[self.axis].normalized()
         return Vector(tuple(1.0 if i == self.axis else 0.0 for i in range(3)))
 
-    def _transform(self):
-        """The change, as a world-space matrix."""
+    def _transform(self, pivot=None):
+        """The change, as a world-space matrix, about the pivot (the one chosen, unless given)."""
         direction = self._direction()
         if self.mode == "TRANSLATE":
             return Matrix.Translation(grab.constrain(self.offset, self.axis, self.plane, direction))
-        about = Matrix.Translation(self.pivot)
+        about = Matrix.Translation(self.pivot if pivot is None else pivot)
         if self.mode == "ROTATE":
             if direction is None:
                 axis, sign = self.toward, 1  # about the view, like Blender's R
@@ -257,8 +265,11 @@ class _TransformOperator(bpy.types.Operator):
         if not obj:
             return
         world = obj.matrix_world
-        change, extra = self._adjust(world.inverted() @ self._transform() @ world)
-        desired = {name: change @ self.matrices[name] for name in self.moved}
+        if self.individual and self.mode != "TRANSLATE":
+            desired, extra = self._individual(world), {}
+        else:
+            change, extra = self._adjust(world.inverted() @ self._transform() @ world)
+            desired = {name: change @ self.matrices[name] for name in self.moved}
         desired.update({name: self.matrices[name] for name in self.pinned})
         desired.update(extra)
         matrix_of = place(obj, desired, self.matrices)
@@ -266,6 +277,30 @@ class _TransformOperator(bpy.types.Operator):
             bpy.context.view_layer.update()  # the solver reads the bones the chains hang from
             self._solve(obj, matrix_of)
         self._status(context)
+
+    def _individual(self, world):
+        """The new matrices with Individual Origins: each selected bone turns or scales about its own head.
+
+        Going down the list, a selected bone adds its own change, about where its head has got to,
+        to what the bones before it already did, and carries the bones after it along: a run of
+        selected bones adds up, as it does in Blender. A selected bone outside the chain is
+        changed on its own."""
+        inverse = world.inverted()
+        desired = {}
+        carried = Matrix.Identity(4)  # what the bones before this one did, in armature space
+        for name in self.moved:
+            head = self.matrices[name].translation
+            if name in self.extra_selected:
+                desired[name] = inverse @ self._transform(world @ head) @ world @ self.matrices[name]
+                continue
+            if name in self.chain_selected:
+                # Its origin is the joint with the bone before it in the list (that bone's head,
+                # where it has got to); the first bone of the list has only its own.
+                joint = self.joints.get(name)
+                origin = desired[joint].translation if joint in desired else self.matrices[joint or name].translation
+                carried = inverse @ self._transform(world @ origin) @ world @ carried
+            desired[name] = carried @ self.matrices[name]
+        return desired
 
     def _solve(self, obj, matrix_of):
         """Bring the IK chains the transform touched to where their end (foot, hand) now is.
@@ -398,6 +433,8 @@ class LIVEIK_OT_parent_chain_transform(_TransformOperator):
         "With a Parent Chain on, move, rotate or scale a bone of the chain together with the bones after it. "
         "X / Y / Z constrain (again for local, with Shift for the plane), Shift is for precision"
     )
+
+    individual_ok = True
 
     @classmethod
     def poll(cls, context):
